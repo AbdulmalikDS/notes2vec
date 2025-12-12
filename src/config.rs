@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use dirs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Configuration for notes2vec
 #[derive(Debug, Clone)]
