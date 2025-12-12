@@ -62,13 +62,13 @@ notes2vec watch /path/to/notes
 
 This continuously monitors your notes and automatically updates the index when files change.
 
-## Technology Stack
+## Stack
 
 - **Language**: Rust
-- **ML Framework**: Candle (pure Rust, quantized models)
-- **Embedding Model**: nomic-embed-text-v1.5 (quantized, 8-bit)
-- **Vector Database**: LanceDB (embedded, local, free)
-- **State Management**: redb (lightweight key-value store)
+- **ML Framework**: Candle 
+- **Embedding Model**: nomic-embed-text-v1.5 quantized, 8-bit
+- **Vector Database**: LanceDB 
+- **State Management**: redb 
 
 ## Project Status
 
@@ -77,3 +77,4 @@ This continuously monitors your notes and automatically updates the index when f
 ## License
 
 Licensed under the MIT license 
+
