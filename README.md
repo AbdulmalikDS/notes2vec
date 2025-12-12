@@ -72,13 +72,8 @@ This continuously monitors your notes and automatically updates the index when f
 
 ## Project Status
 
-🚧 **Early Development** - This project is currently in active development.
+**Early Development** - This project is currently in active development.
 
 ## License
 
-Licensed under the MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT).
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
+Licensed under the MIT license 
