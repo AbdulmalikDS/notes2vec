@@ -90,7 +90,6 @@ fn is_markdown_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn test_is_markdown_file() {

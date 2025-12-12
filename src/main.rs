@@ -4,6 +4,7 @@ use notes2vec::config::Config;
 use notes2vec::discovery::discover_files;
 use notes2vec::error::{Error, Result};
 use notes2vec::state::{calculate_file_hash, get_file_modified_time, StateStore};
+use notes2vec::vectors::VectorStore;
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
@@ -59,8 +60,9 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
         ));
     }
     
-    // Open state store
+    // Open state store and vector store
     let state_store = StateStore::open(&config)?;
+    let vector_store = VectorStore::open(&config)?;
     
     let root_path = PathBuf::from(path);
     
@@ -79,14 +81,17 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
     let mut processed = 0;
     let mut skipped = 0;
     let mut errors = 0;
+    let mut chunks_indexed = 0;
     
     for file in &files {
+        let file_path_str = file.relative_path.to_str().unwrap_or("");
+        
         // Check if file has changed (unless force is true)
         if !force {
             match (get_file_modified_time(&file.path), calculate_file_hash(&file.path)) {
                 (Ok(modified_time), Ok(hash)) => {
                     if let Ok(false) = state_store.has_file_changed(
-                        file.relative_path.to_str().unwrap_or(""),
+                        file_path_str,
                         modified_time,
                         &hash,
                     ) {
@@ -102,12 +107,45 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
         
         match notes2vec::parser::parse_markdown_file(&file.path) {
             Ok(doc) => {
+                // Remove old vectors for this file if re-indexing
+                if force {
+                    if let Err(e) = vector_store.remove_file(file_path_str) {
+                        eprintln!("  ⚠ Warning: Failed to remove old vectors for {}: {}", 
+                                 file.relative_path.display(), e);
+                    }
+                }
+                
+                // Process chunks (for now, just store metadata - embeddings will be added later)
+                // TODO: Generate embeddings once model loading is implemented
+                for chunk in &doc.chunks {
+                    // Create a placeholder embedding (zeros) - will be replaced with actual embeddings
+                    let embedding_dim = 768; // Default for nomic-embed-text-v1.5
+                    let placeholder_embedding = vec![0.0f32; embedding_dim];
+                    
+                    let vector_entry = notes2vec::vectors::VectorEntry::new(
+                        file_path_str.to_string(),
+                        chunk.chunk_index,
+                        placeholder_embedding,
+                        chunk.text.clone(),
+                        chunk.context.clone(),
+                        chunk.start_line,
+                        chunk.end_line,
+                    );
+                    
+                    if let Err(e) = vector_store.insert(&vector_entry) {
+                        eprintln!("  ⚠ Warning: Failed to store vector for chunk {}: {}", 
+                                 chunk.chunk_index, e);
+                    } else {
+                        chunks_indexed += 1;
+                    }
+                }
+                
                 // Update state store
                 if let (Ok(modified_time), Ok(hash)) =
                     (get_file_modified_time(&file.path), calculate_file_hash(&file.path))
                 {
                     if let Err(e) = state_store.update_file_state(
-                        file.relative_path.to_str().unwrap_or(""),
+                        file_path_str,
                         modified_time,
                         hash,
                     ) {
@@ -118,7 +156,6 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
                 
                 println!("  ✓ {} ({} chunks)", file.relative_path.display(), doc.chunks.len());
                 processed += 1;
-                // TODO: Generate embeddings and store in database
             }
             Err(e) => {
                 eprintln!("  ✗ {}: {}", file.relative_path.display(), e);
@@ -129,13 +166,14 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
     
     println!("\nIndexing complete!");
     println!("  Processed: {} files", processed);
+    println!("  Chunks indexed: {}", chunks_indexed);
     if skipped > 0 {
         println!("  Skipped (unchanged): {} files", skipped);
     }
     if errors > 0 {
         println!("  Errors: {} files", errors);
     }
-    println!("\nNote: Embedding generation and database storage will be implemented next.");
+    println!("\nNote: Embedding generation will be implemented next. Currently storing placeholder vectors.");
     
     Ok(())
 }
@@ -169,10 +207,39 @@ fn handle_search(query: &str, limit: usize) -> Result<()> {
         ));
     }
     
-    // TODO: Implement search logic
-    println!("Search functionality will be implemented next...");
-    println!("Query: {}", query);
-    println!("Limit: {}", limit);
+    // Open vector store
+    let vector_store = VectorStore::open(&config)?;
+    
+    // TODO: Generate query embedding once model is implemented
+    // For now, use a placeholder embedding
+    let embedding_dim = 768;
+    let query_embedding = vec![0.0f32; embedding_dim];
+    
+    // Search for similar vectors
+    match vector_store.search(&query_embedding, limit) {
+        Ok(results) => {
+            if results.is_empty() {
+                println!("\nNo results found.");
+                println!("Note: Embedding generation is not yet implemented. Search will work once embeddings are generated.");
+            } else {
+                println!("\nFound {} results:", results.len());
+                for (i, (entry, similarity)) in results.iter().enumerate() {
+                    println!("\n{}. {} (similarity: {:.3})", i + 1, entry.file_path, similarity);
+                    if !entry.context.is_empty() {
+                        println!("   Context: {}", entry.context);
+                    }
+                    // Show preview of text (first 150 chars)
+                    let preview: String = entry.text.chars().take(150).collect();
+                    println!("   Preview: {}...", preview);
+                    println!("   Lines: {}-{}", entry.start_line, entry.end_line);
+                }
+                println!("\nNote: Embedding generation is not yet implemented. Similarity scores are placeholders.");
+            }
+        }
+        Err(e) => {
+            return Err(Error::Database(format!("Search failed: {}", e)));
+        }
+    }
     
     Ok(())
 }

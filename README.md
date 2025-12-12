@@ -74,6 +74,41 @@ This continuously monitors your notes and automatically updates the index when f
 
 **Early Development** - This project is currently in active development.
 
+### Current Implementation Status
+
+✅ **Completed:**
+- CLI structure and command parsing
+- Configuration management
+- File discovery (Markdown files with .gitignore support)
+- Markdown parsing (frontmatter, chunks, headers)
+- State management (file change tracking with redb)
+- Basic indexing workflow
+
+🚧 **In Progress / TODO:**
+- Embedding generation (Candle integration)
+- Vector database storage (LanceDB integration pending dependency fix)
+- Model downloading/loading
+- Search functionality
+- Watch/daemon mode
+
+## Testing
+
+Quick test:
+```bash
+# Build the project
+cargo build
+
+# Run unit tests
+cargo test
+
+# Run integration tests
+cargo test --test integration_test
+
+# Manual testing
+cargo run -- init --base-dir ./test_data
+cargo run -- index ./path/to/notes
+```
+
 ## License
 
 Licensed under the MIT license 

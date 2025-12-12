@@ -59,10 +59,17 @@ impl StateStore {
             std::fs::create_dir_all(parent)?;
         }
 
-        let db = Database::create(&config.state_path)
-            .map_err(|e| Error::Database(format!("Failed to create state database: {}", e)))?;
+        // Create or open the database
+        // Database::create will create a new database or open existing one
+        let db = if config.state_path.exists() {
+            Database::open(&config.state_path)
+                .map_err(|e| Error::Database(format!("Failed to open state database: {}", e)))?
+        } else {
+            Database::create(&config.state_path)
+                .map_err(|e| Error::Database(format!("Failed to create state database: {}", e)))?
+        };
 
-        // Initialize table
+        // Initialize table (this is safe even if table already exists)
         let write_txn = db.begin_write().map_err(|e| {
             Error::Database(format!("Failed to begin write transaction: {}", e))
         })?;
