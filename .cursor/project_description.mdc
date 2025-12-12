@@ -1,0 +1,141 @@
+---
+alwaysApply: true
+---
+
+# notes2vec: Local Semantic Search for Personal Notes
+
+## Overview
+
+notes2vec is a lightweight, local-first semantic search engine built in Rust. It helps you find your personal notes, journals, and documentation based on meaning, not just keywords. Unlike traditional search tools that require exact word matches, notes2vec understands what you're looking for even if you use different words than what you wrote.
+
+## The Problem
+
+Traditional search tools like grep or full-text search engines only find exact keyword matches. This creates problems:
+- You might write a note about "persistent storage" but later search for "database mechanisms" and get no results
+- Your vocabulary changes over time, making old notes hard to find
+- You can't find notes based on concepts or ideas, only exact words
+
+## The Solution
+
+notes2vec uses semantic search powered by AI embeddings. It converts your notes and search queries into mathematical vectors (lists of numbers) that represent meaning. Notes with similar meanings are close together in this mathematical space, so you can find them even when the words don't match.
+
+## Key Features
+
+### Local-First Architecture
+- **Complete Privacy**: All your data stays on your computer. Nothing is sent to the cloud.
+- **Works Offline**: No internet connection needed after initial setup.
+- **Simple Installation**: Single binary file, no Docker or external services required.
+
+### Smart Indexing
+- **Automatic Updates**: Watches your note directories and updates the index when files change.
+- **Efficient**: Only re-indexes files that have actually changed.
+- **Respects .gitignore**: Automatically skips build artifacts and other non-content files.
+
+### Semantic Understanding
+- **Concept-Based Search**: Find notes by meaning, not just keywords.
+- **Markdown-Aware**: Understands document structure (headers, sections) for better context.
+- **Handles Multiple Formats**: Works with Obsidian, Notion exports, and standard Markdown.
+
+## Technology Stack
+
+### Core Components
+- **Language**: Rust (for safety, performance, and memory efficiency)
+- **ML Framework**: Candle (pure Rust, no Python needed)
+- **Embedding Model**: nomic-embed-text-v1.5 (quantized, runs efficiently on CPU)
+- **Vector Database**: LanceDB (embedded, disk-backed, high performance)
+- **State Management**: redb (lightweight key-value store for tracking changes)
+
+### Supporting Libraries
+- **CLI**: clap (command-line interface)
+- **TUI**: ratatui (terminal user interface for search results)
+- **File Watching**: notify-debouncer-full (monitors file changes)
+- **Markdown Parsing**: pulldown-cmark (fast, stream-based parser)
+- **Text Chunking**: semchunk-rs (intelligent text splitting)
+- **Async Runtime**: tokio (handles concurrent operations)
+- **Parallel Processing**: rayon (speeds up bulk indexing)
+
+## How It Works
+
+### 1. Initialization
+```bash
+notes2vec init
+```
+Sets up the local database and downloads the embedding model (cached for offline use).
+
+### 2. Indexing
+```bash
+notes2vec index /path/to/notes
+```
+- Scans your note directories
+- Parses Markdown files
+- Extracts text and structure (headers, sections)
+- Converts text chunks into vector embeddings
+- Stores vectors and metadata in LanceDB
+
+### 3. Watching (Daemon Mode)
+```bash
+notes2vec watch /path/to/notes
+```
+Continuously monitors your notes and automatically updates the index when files change.
+
+### 4. Searching
+```bash
+notes2vec search "how to configure database"
+```
+- Converts your query into a vector
+- Finds the most similar note chunks using approximate nearest neighbor search
+- Returns ranked results with context
+
+## Architecture Highlights
+
+### Memory Efficiency
+- Uses quantized models (8-bit) to reduce RAM usage from ~500MB to ~20-30MB
+- Disk-backed vector storage allows handling datasets larger than available RAM
+- Matryoshka learning support enables variable-length embeddings for storage optimization
+
+### Performance
+- Zero-copy reads from disk using Arrow format
+- Batch processing for embeddings (more efficient than one-by-one)
+- Parallel indexing using Rayon for initial bulk operations
+- Async I/O with Tokio for non-blocking file operations
+
+### Data Flow
+1. **File Discovery**: Walk directories respecting .gitignore rules
+2. **Change Detection**: Compare file hashes to avoid re-indexing unchanged files
+3. **Parsing**: Extract Markdown structure and frontmatter metadata
+4. **Chunking**: Split documents into semantic chunks with context preservation
+5. **Embedding**: Convert text chunks to vectors using Candle
+6. **Storage**: Write vectors and metadata to LanceDB
+7. **Search**: Query embedding → ANN search → Ranked results
+
+## Design Principles
+
+1. **Data Sovereignty**: Your notes never leave your machine
+2. **Zero Dependencies**: Single binary, no external services
+3. **Performance**: Fast enough for interactive use on consumer hardware
+4. **Privacy**: No cloud services, no data collection
+5. **Simplicity**: Easy to install, easy to use
+
+## Future Possibilities
+
+- **Hybrid Search**: Combine semantic search with keyword search for best of both worlds
+- **Image Search**: Use CLIP models to search for images in your notes
+- **LLM Integration**: Expose search as an API for local AI assistants (via MCP protocol)
+
+## Target Users
+
+- Knowledge workers with large personal note collections
+- Developers maintaining technical documentation
+- Researchers organizing papers and notes
+- Anyone frustrated with keyword-only search in their personal knowledge base
+
+## Why Rust?
+
+- **Memory Safety**: Prevents crashes and security vulnerabilities
+- **Performance**: No garbage collector means consistent, low latency
+- **Ecosystem**: Native ML libraries (Candle) and vector databases (LanceDB)
+- **Distribution**: Single binary, no Python runtime or virtual environments needed
+
+---
+
+notes2vec solves the "forgetful writer" problem: you don't need to remember the exact words you used. Just search for what you mean, and notes2vec will find it.

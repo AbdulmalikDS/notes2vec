@@ -1,0 +1,238 @@
+---
+alwaysApply: true
+---
+
+# System Patterns: notes2vec Architecture
+
+## High-Level Architecture
+
+```mermaid
+flowchart TD
+    CLI["CLI Interface<br>(clap)"] --> InitCmd["init command"]
+    CLI --> IndexCmd["index command"]
+    CLI --> WatchCmd["watch command"]
+    CLI --> SearchCmd["search command"]
+    
+    InitCmd --> ConfigMgr["Config Manager<br>~/.notes2vec"]
+    InitCmd --> ModelDownload["Model Downloader<br>nomic-embed-text-v1.5"]
+    
+    IndexCmd --> FileWalker["File Walker<br>(ignore crate)"]
+    FileWalker --> ChangeDetector["Change Detector<br>(redb state store)"]
+    ChangeDetector --> Parser["Markdown Parser<br>(pulldown-cmark)"]
+    Parser --> Chunker["Semantic Chunker<br>(semchunk-rs)"]
+    Chunker --> Embedder["Embedding Engine<br>(Candle)"]
+    Embedder --> VectorDB["Vector Database<br>(LanceDB)"]
+    
+    WatchCmd --> FileWatcher["File Watcher<br>(notify-debouncer-full)"]
+    FileWatcher --> ChangeDetector
+    
+    SearchCmd --> QueryEmbedder["Query Embedder<br>(Candle)"]
+    QueryEmbedder --> VectorDB
+    VectorDB --> Results["Search Results<br>(TUI via ratatui)"]
+```
+
+## Core Design Patterns
+
+### 1. Embedded Database Pattern
+
+**Principle**: All data storage is embedded within the application process, no external services.
+
+**Implementation**:
+- LanceDB runs as a library within the notes2vec binary
+- State tracking uses redb (embedded key-value store)
+- All data stored in `~/.notes2vec` directory
+- Zero external dependencies for runtime operation
+
+**Rationale**: Enables single-binary distribution and complete offline operation.
+
+### 2. Incremental Indexing Pattern
+
+**Principle**: Only process files that have changed since last indexing.
+
+**Implementation**:
+- Maintain file path → (timestamp, content_hash) mapping in redb
+- On startup, compare current file state with stored state
+- Only index new or modified files
+- Delete vectors for files that no longer exist
+
+**Rationale**: Efficient for large note collections, avoids redundant processing.
+
+### 3. Semantic Chunking with Context Injection
+
+**Principle**: Preserve document structure and hierarchy in chunk embeddings.
+
+**Implementation**:
+- Parse Markdown to extract header hierarchy
+- Build context stack: `<Document Title > Section > Subsection`
+- Prepend context to each chunk before embedding
+- Chunk size: 512 tokens (configurable)
+
+**Rationale**: Improves retrieval accuracy by maintaining semantic context.
+
+### 4. Debounced File Watching
+
+**Principle**: Aggregate file system events to avoid thrashing during writes.
+
+**Implementation**:
+- Use notify-debouncer-full with 500ms window
+- Aggregate multiple events for same file into single Modified event
+- Queue files for indexing after debounce period
+
+**Rationale**: Prevents indexing files that are still being written.
+
+### 5. Batch Processing for Embeddings
+
+**Principle**: Process multiple chunks together for efficiency.
+
+**Implementation**:
+- Collect chunks into batches (e.g., 32 chunks)
+- Pass entire batch to Candle inference engine
+- Leverage SIMD and parallel processing in model
+
+**Rationale**: Significantly faster than one-by-one processing.
+
+### 6. Hybrid Concurrency Model
+
+**Principle**: Use appropriate concurrency primitives for different workload types.
+
+**Implementation**:
+- **Tokio**: Async runtime for I/O-bound operations (file reading, database writes)
+- **Rayon**: Data parallelism for CPU-bound operations (initial bulk indexing)
+- **Dedicated Thread**: Embedding model runs in separate thread to avoid blocking async runtime
+
+**Rationale**: Optimizes resource utilization and prevents blocking.
+
+## Data Flow Architecture
+
+### Indexing Pipeline
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI
+    participant Walker as File Walker
+    participant State as State Store (redb)
+    participant Parser as Markdown Parser
+    participant Chunker as Semantic Chunker
+    participant Embedder as Embedding Engine
+    participant DB as LanceDB
+    
+    User->>CLI: notes2vec index /path
+    CLI->>Walker: Walk directory tree
+    Walker->>State: Check file hash
+    State-->>Walker: File changed/unchanged
+    Walker->>Parser: Parse Markdown
+    Parser->>Chunker: Extract chunks with context
+    Chunker->>Embedder: Batch chunks
+    Embedder->>DB: Store vectors + metadata
+    DB->>State: Update file hash
+    CLI-->>User: Indexing complete
+```
+
+### Search Pipeline
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant CLI
+    participant Embedder as Query Embedder
+    participant DB as LanceDB
+    participant TUI as Results Display
+    
+    User->>CLI: notes2vec search "query"
+    CLI->>Embedder: Embed query text
+    Embedder->>DB: ANN search (cosine similarity)
+    DB-->>Embedder: Top K results
+    Embedder->>TUI: Format results
+    TUI-->>User: Display ranked results
+```
+
+## Key Technical Decisions
+
+### Vector Database: LanceDB
+
+**Decision**: Use LanceDB as the embedded vector database.
+
+**Rationale**:
+- Native Rust implementation
+- Disk-backed storage (scales beyond RAM)
+- Zero-copy reads via Arrow format
+- IVF-PQ indexing for efficient ANN search
+- Supports hybrid search (vector + metadata filtering)
+
+**Alternatives Considered**:
+- SQLite-vec: Simpler but less mature, performance limitations
+- Qdrant (embedded): More memory-intensive due to HNSW graphs
+
+### ML Framework: Candle
+
+**Decision**: Use Candle for embedding model inference.
+
+**Rationale**:
+- Pure Rust (no Python dependency)
+- Supports quantized models (8-bit, reduces RAM from ~500MB to ~20-30MB)
+- Integrates with Hugging Face Hub
+- Good performance on CPU
+
+**Alternatives Considered**:
+- ONNX Runtime: Faster but requires dynamic linking
+- rust-bert: Too heavy (1GB+ binary size)
+
+### Embedding Model: nomic-embed-text-v1.5
+
+**Decision**: Use quantized nomic-embed-text-v1.5 model.
+
+**Rationale**:
+- State-of-the-art open-source embeddings
+- Supports Matryoshka learning (variable-length embeddings)
+- 8192 token context window (vs 512 for MiniLM)
+- Good balance of quality and efficiency
+
+**Alternatives Considered**:
+- all-MiniLM-L6-v2: Faster but lower quality
+- bge-m3: Larger, more resource-intensive
+
+### File Watching: notify-debouncer-full
+
+**Decision**: Use notify-debouncer-full for file system monitoring.
+
+**Rationale**:
+- Cross-platform support
+- Built-in debouncing prevents event storms
+- Handles complex file operations (rename, move, etc.)
+
+## Storage Schema
+
+### LanceDB Table Structure
+
+- **Vector Column**: Embedding vector (768 dimensions, truncated to 256 for storage)
+- **Metadata Columns**:
+  - `file_path`: String (source file path)
+  - `chunk_text`: String (original chunk text)
+  - `chunk_index`: Integer (position in document)
+  - `header_context`: String (hierarchy: "Doc > Section > Subsection")
+  - `frontmatter_tags`: Array<String> (extracted tags)
+  - `last_modified`: Timestamp
+
+### redb State Store Schema
+
+- **Key**: File path (String)
+- **Value**: JSON object containing:
+  - `last_modified`: Timestamp
+  - `content_hash`: SHA256 hash of file contents
+  - `indexed_at`: Timestamp of last successful indexing
+
+## Error Handling Strategy
+
+1. **File I/O Errors**: Log warning, skip file, continue indexing
+2. **Parsing Errors**: Log error with file path, skip file, continue
+3. **Embedding Errors**: Retry with smaller batch size, log if persistent
+4. **Database Errors**: Log critical error, abort operation
+5. **Model Loading Errors**: Provide clear error message, suggest re-download
+
+## Performance Considerations
+
+- **Memory**: Quantized model keeps RAM usage under 50MB during indexing
+- **Disk**: LanceDB uses columnar storage for efficient reads
+- **CPU**: Batch processing and parallel indexing maximize throughput
+- **Latency**: Search targets < 1 second on consumer hardware

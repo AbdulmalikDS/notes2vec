@@ -1,0 +1,57 @@
+---
+alwaysApply: true
+---
+
+# Project Brief: notes2vec
+
+## Core Mission
+
+notes2vec is a lightweight, local-first semantic search engine built in Rust that enables users to find personal notes, journals, and documentation based on meaning rather than exact keyword matches. The tool solves the "forgetful writer" problem by allowing users to search for concepts and ideas, not just the exact words they used when writing.
+
+## Primary Objectives
+
+1. **Enable Semantic Search**: Convert notes and queries into vector embeddings to find content by meaning, not keywords
+2. **Maintain Complete Privacy**: All processing happens locally; no data leaves the user's machine
+3. **Provide Zero-Dependency Experience**: Single binary distribution, no Docker, no external services
+4. **Support Real-Time Updates**: Automatically index changes to note directories
+5. **Optimize for Performance**: Fast enough for interactive use on consumer hardware
+
+## Key Deliverables
+
+- **CLI Tool**: Command-line interface supporting `init`, `index`, `watch`, and `search` commands
+- **Embedded Vector Database**: Local storage using LanceDB for vector persistence
+- **Semantic Indexing**: Automatic conversion of Markdown files to searchable vector embeddings
+- **File Watching**: Real-time monitoring and incremental indexing of note directories
+- **TUI Interface**: Terminal-based user interface for displaying search results
+
+## Absolute Constraints
+
+1. **Local-First Architecture**: No cloud services, no network dependencies after initial setup
+2. **Data Sovereignty**: User data never leaves the local machine
+3. **Single Binary**: Must distribute as a standalone executable
+4. **Privacy**: No telemetry, no data collection, no external API calls
+5. **Performance**: Must run efficiently on consumer hardware (laptops, desktops)
+
+## Scope Boundaries
+
+**In Scope:**
+- Markdown file parsing and indexing
+- Semantic search using vector embeddings
+- File system watching and incremental updates
+- Support for Obsidian, Notion exports, and standard Markdown
+- Respect for .gitignore rules
+
+**Out of Scope (Initial Version):**
+- Cloud synchronization
+- Multi-user support
+- Web interface
+- Image search (future enhancement)
+- LLM integration (future enhancement)
+
+## Success Criteria
+
+- Users can find notes using natural language queries that don't match exact keywords
+- Indexing completes in reasonable time for typical note collections (< 10,000 files)
+- Search results are returned in < 1 second on consumer hardware
+- Tool runs entirely offline after initial setup
+- Binary size remains under 100MB (including quantized model)

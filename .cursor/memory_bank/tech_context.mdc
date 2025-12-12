@@ -1,0 +1,292 @@
+---
+alwaysApply: true
+---
+
+# Technical Context: notes2vec
+
+## Programming Language
+
+**Rust** (latest stable version)
+
+**Rationale**:
+- Memory safety without garbage collection
+- High performance suitable for ML workloads
+- Rich ecosystem for ML and vector databases
+- Single binary distribution capability
+
+## Core Dependencies
+
+### Machine Learning & Embeddings
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `candle-core` | Latest | Core ML framework |
+| `candle-transformers` | Latest | Transformer model support |
+| `candle-nn` | Latest | Neural network operations |
+| `hf-hub` | Latest | Hugging Face model downloading |
+
+**Model**: `nomic-ai/nomic-embed-text-v1.5` (quantized, 8-bit)
+
+### Vector Database
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `lancedb` | Latest | Embedded vector database |
+| `arrow` | Latest | Columnar data format (dependency) |
+
+### State Management
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `redb` | Latest | Embedded key-value store for change tracking |
+
+### CLI & User Interface
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `clap` | Latest (v4+) | Command-line argument parsing |
+| `ratatui` | Latest | Terminal user interface for search results |
+
+### File System Operations
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `notify-debouncer-full` | Latest | File system watching with debouncing |
+| `ignore` | Latest | Directory traversal respecting .gitignore |
+| `walkdir` | Latest | Alternative directory walking (if needed) |
+
+### Text Processing
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `pulldown-cmark` | Latest | Markdown parsing (stream-based) |
+| `semchunk-rs` | Latest | Semantic text chunking |
+| `markdown-frontmatter` | Latest | YAML frontmatter extraction |
+
+### Async Runtime
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `tokio` | Latest | Async runtime for I/O operations |
+| `rayon` | Latest | Data parallelism for CPU-bound tasks |
+
+### Utilities
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `serde` | Latest | Serialization/deserialization |
+| `serde_json` | Latest | JSON handling |
+| `anyhow` | Latest | Error handling |
+| `thiserror` | Latest | Custom error types |
+| `tracing` | Latest | Structured logging |
+| `dirs` | Latest | Platform-specific directory paths |
+
+## Development Environment
+
+### Required Tools
+
+- **Rust Toolchain**: Latest stable (install via rustup)
+- **Cargo**: Rust package manager (included with Rust)
+- **Git**: Version control
+
+### Optional Tools
+
+- **rust-analyzer**: IDE support for Rust
+- **cargo-watch**: For development hot-reloading
+- **cargo-clippy**: Linting
+- **cargo-fmt**: Code formatting
+
+## Build Configuration
+
+### Cargo.toml Structure
+
+```toml
+[package]
+name = "notes2vec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies listed above
+```
+
+### Feature Flags (Potential)
+
+- `gpu`: Enable GPU acceleration via Candle (CUDA/Metal)
+- `tui`: Enable TUI interface (ratatui)
+- `default`: Standard features for typical use
+
+## Runtime Requirements
+
+### Minimum System Requirements
+
+- **OS**: Linux, macOS, or Windows
+- **RAM**: 512MB available (for quantized model)
+- **Disk**: 100MB for binary + model cache
+- **CPU**: x86_64 or ARM64
+
+### Recommended System Requirements
+
+- **RAM**: 2GB+ available
+- **Disk**: 500MB+ for database and model cache
+- **CPU**: Multi-core for parallel indexing
+
+## Storage Locations
+
+### Configuration Directory
+
+- **Linux/macOS**: `~/.notes2vec/`
+- **Windows**: `%APPDATA%\notes2vec\`
+
+### Directory Structure
+
+```
+~/.notes2vec/
+├── config.toml          # User configuration
+├── database/            # LanceDB database files
+│   └── .lancedb/
+├── state/               # redb state store
+│   └── state.redb
+└── models/              # Cached embedding models
+    └── nomic-embed-text-v1.5/
+```
+
+## External Services
+
+### Model Download
+
+- **Source**: Hugging Face Hub
+- **Model**: `nomic-ai/nomic-embed-text-v1.5`
+- **Format**: Quantized SafeTensors or GGUF
+- **Caching**: Downloaded once, cached locally
+- **Network**: Required only for initial download
+
+### No Other External Services
+
+The tool operates completely offline after initial setup. No telemetry, analytics, or external API calls.
+
+## Performance Targets
+
+### Indexing Performance
+
+- **Throughput**: 100-500 files/minute (depending on file size)
+- **Memory**: < 100MB RAM during indexing
+- **CPU**: Efficient use of available cores
+
+### Search Performance
+
+- **Latency**: < 1 second for typical queries
+- **Throughput**: 10+ queries/second
+- **Memory**: < 50MB RAM during search
+
+### Storage Efficiency
+
+- **Vector Size**: 256 dimensions (truncated from 768 using Matryoshka learning)
+- **Compression**: Quantized embeddings reduce storage by ~75%
+- **Database**: Columnar format (Arrow) enables efficient compression
+
+## Security Considerations
+
+### File Permissions
+
+- Database files: 0600 (owner read/write only) on Unix systems
+- Configuration files: 0600 (owner read/write only)
+
+### Data Privacy
+
+- No network calls after initial model download
+- No telemetry or analytics
+- All data stored locally
+- User responsible for Full Disk Encryption (FileVault/BitLocker)
+
+### Input Sanitization
+
+- Strip HTML comments during parsing (prevent indirect prompt injection)
+- Validate file paths to prevent directory traversal
+- Limit file size to prevent DoS attacks
+
+## Platform-Specific Notes
+
+### Windows
+
+- Use `notify` crate's Windows backend
+- Path handling via `std::path::PathBuf`
+- Configuration in `%APPDATA%`
+
+### Linux
+
+- Use `notify` crate's inotify backend
+- Respect XDG base directory specification
+- Configuration in `~/.config/notes2vec/` (if following XDG)
+
+### macOS
+
+- Use `notify` crate's FSEvents backend
+- Configuration in `~/.notes2vec/`
+- Support for Apple Silicon (ARM64)
+
+## Testing Strategy
+
+### Unit Tests
+
+- Test individual components (parsing, chunking, etc.)
+- Mock external dependencies where appropriate
+
+### Integration Tests
+
+- Test full indexing pipeline with sample files
+- Test search functionality with known queries
+- Test file watching with simulated changes
+
+### Performance Tests
+
+- Benchmark indexing throughput
+- Benchmark search latency
+- Memory profiling during operations
+
+## Deployment
+
+### Distribution Strategy
+
+**Primary Approach: Pre-built Binaries**
+- End users should NOT need Rust installed
+- Distribute standalone binaries via GitHub Releases
+- Support multiple platforms: Windows, macOS (Intel & Apple Silicon), Linux
+- Use GitHub Actions for automated builds on each release
+
+**Secondary Approach: Package Managers**
+- Homebrew for macOS (when formula is available)
+- cargo-binstall for Rust ecosystem users
+- Scoop for Windows (optional)
+- Native package managers (apt, dnf) for Linux distributions
+
+**Developer Approach: Build from Source**
+- Rust is only required for developers who want to build from source
+- Documented in README under "Build from Source (For Developers)"
+
+### Distribution Format
+
+- **Primary**: Single static binary (no dependencies, no Rust required)
+- **Package Managers**: Native installers (.exe, .dmg, .deb) via cargo-packager or cargo-bundle
+- **Alternative**: Cargo crate for Rust users who prefer `cargo install`
+
+### Build Targets
+
+- `x86_64-unknown-linux-gnu` (Linux)
+- `x86_64-apple-darwin` (macOS Intel)
+- `aarch64-apple-darwin` (macOS Apple Silicon)
+- `x86_64-pc-windows-msvc` (Windows)
+
+### Binary Size Target
+
+- < 100MB (including quantized model)
+- Optimize with `cargo build --release`
+- Consider LTO (Link Time Optimization)
+- Static linking where possible to avoid runtime dependencies
+
+### CI/CD for Releases
+
+- GitHub Actions workflow automatically builds binaries for all platforms
+- Binaries attached to GitHub Releases
+- No manual build process required
+- Ensures consistent, tested builds across platforms
