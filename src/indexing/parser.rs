@@ -263,28 +263,26 @@ fn split_text_intelligently(
     }
 
     // Split by sentence boundaries (., !, ? followed by space, newline, or end)
+    // Optimized: Use char_indices directly instead of collecting into Vec<char>
     let mut sentences = Vec::new();
-    let mut start = 0;
-    let chars: Vec<char> = trimmed.chars().collect();
+    let mut start_byte = 0;
     
-    for (i, &ch) in chars.iter().enumerate() {
+    for (_char_idx, (byte_pos, ch)) in trimmed.char_indices().enumerate() {
         if matches!(ch, '.' | '!' | '?') {
             // Check if followed by whitespace or end of string
-            let next_char = chars.get(i + 1);
+            let next_char = trimmed[byte_pos + ch.len_utf8()..].chars().next();
             if next_char.map(|c| c.is_whitespace()).unwrap_or(true) {
-                // Use char_indices to get byte positions for slicing
-                let byte_start = trimmed.char_indices().nth(start).map(|(pos, _)| pos).unwrap_or(0);
-                let byte_end = trimmed.char_indices().nth(i).map(|(pos, _)| pos + 1).unwrap_or(trimmed.len());
-                sentences.push(&trimmed[byte_start..byte_end.min(trimmed.len())]);
-                start = i + 1;
+                // Found sentence boundary
+                let end_byte = byte_pos + ch.len_utf8();
+                sentences.push(&trimmed[start_byte..end_byte]);
+                start_byte = end_byte;
             }
         }
     }
     
     // Add remaining text if any
-    if start < chars.len() {
-        let byte_start = trimmed.char_indices().nth(start).map(|(pos, _)| pos).unwrap_or(trimmed.len());
-        sentences.push(&trimmed[byte_start..]);
+    if start_byte < trimmed.len() {
+        sentences.push(&trimmed[start_byte..]);
     }
 
     let mut current_chunk = String::new();
