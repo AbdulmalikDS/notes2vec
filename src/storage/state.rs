@@ -9,6 +9,9 @@ use std::time::SystemTime;
 /// Using &str for both key and value (JSON serialized)
 const FILE_STATE_TABLE: TableDefinition<&str, &str> = TableDefinition::new("file_state");
 
+// Stored in FILE_STATE_TABLE as a JSON string; used to detect model changes and force re-index.
+const META_MODEL_ID_KEY: &str = "__notes2vec_meta_model_id__";
+
 /// State information for a file
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FileState {
@@ -63,7 +66,14 @@ impl StateStore {
         // Database::create will create a new database or open existing one
         let db = if config.state_path.exists() {
             Database::open(&config.state_path)
-                .map_err(|e| Error::Database(format!("Failed to open state database: {}", e)))?
+                .map_err(|e| {
+                    let msg = e.to_string();
+                    if msg.to_lowercase().contains("lock") {
+                        Error::Database("State database is locked. Another notes2vec process may be running. Close other instances and try again.".to_string())
+                    } else {
+                        Error::Database(format!("Failed to open state database: {}", e))
+                    }
+                })?
         } else {
             Database::create(&config.state_path)
                 .map_err(|e| Error::Database(format!("Failed to create state database: {}", e)))?
@@ -180,6 +190,46 @@ impl StateStore {
             }
         }
     }
+
+    pub fn get_model_id(&self) -> Result<Option<String>> {
+        let read_txn = self.db.begin_read().map_err(|e| {
+            Error::Database(format!("Failed to begin read transaction: {}", e))
+        })?;
+
+        let table = read_txn.open_table(FILE_STATE_TABLE).map_err(|e| {
+            Error::Database(format!("Failed to open table: {}", e))
+        })?;
+
+        let v = table.get(META_MODEL_ID_KEY).map_err(|e| {
+            Error::Database(format!("Failed to get model id: {}", e))
+        })?;
+
+        match v {
+            Some(guard) => Ok(Some(guard.value().to_string())),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_model_id(&self, model_id: &str) -> Result<()> {
+        let write_txn = self.db.begin_write().map_err(|e| {
+            Error::Database(format!("Failed to begin write transaction: {}", e))
+        })?;
+
+        {
+            let mut table = write_txn.open_table(FILE_STATE_TABLE).map_err(|e| {
+                Error::Database(format!("Failed to open table: {}", e))
+            })?;
+            table.insert(META_MODEL_ID_KEY, model_id).map_err(|e| {
+                Error::Database(format!("Failed to store model id: {}", e))
+            })?;
+        }
+
+        write_txn.commit().map_err(|e| {
+            Error::Database(format!("Failed to commit transaction: {}", e))
+        })?;
+
+        Ok(())
+    }
 }
 
 /// Calculate SHA256 hash of file contents
@@ -212,5 +262,198 @@ pub fn get_file_modified_time(path: &Path) -> Result<u64> {
             format!("Failed to get modification time: {}", e),
         )))?;
     Ok(duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::Config;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_file_state_creation() {
+        let state = FileState::new(12345, "abc123".to_string());
+        assert_eq!(state.last_modified, 12345);
+        assert_eq!(state.content_hash, "abc123");
+        assert!(state.indexed_at > 0);
+    }
+
+    #[test]
+    fn test_file_state_serialization() {
+        let state = FileState::new(12345, "abc123".to_string());
+        
+        let json = state.to_json().unwrap();
+        assert!(json.contains("12345"));
+        assert!(json.contains("abc123"));
+
+        let deserialized = FileState::from_json(&json).unwrap();
+        assert_eq!(deserialized.last_modified, state.last_modified);
+        assert_eq!(deserialized.content_hash, state.content_hash);
+    }
+
+    #[test]
+    fn test_state_store_open_and_init() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().join("test_notes2vec");
+        let config = Config::new(Some(base_dir)).unwrap();
+        config.init().unwrap();
+
+        let _store = StateStore::open(&config).unwrap();
+        // Should not panic
+        assert!(true);
+    }
+
+    #[test]
+    fn test_state_store_update_and_get() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().join("test_notes2vec");
+        let config = Config::new(Some(base_dir)).unwrap();
+        config.init().unwrap();
+
+        let store = StateStore::open(&config).unwrap();
+
+        // File should not exist initially
+        let state = store.get_file_state("test.md").unwrap();
+        assert!(state.is_none());
+
+        // Update state
+        store.update_file_state("test.md", 12345, "hash123".to_string()).unwrap();
+
+        // File should exist now
+        let state = store.get_file_state("test.md").unwrap();
+        assert!(state.is_some());
+        let state = state.unwrap();
+        assert_eq!(state.last_modified, 12345);
+        assert_eq!(state.content_hash, "hash123");
+    }
+
+    #[test]
+    fn test_state_store_has_file_changed() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().join("test_notes2vec");
+        let config = Config::new(Some(base_dir)).unwrap();
+        config.init().unwrap();
+
+        let store = StateStore::open(&config).unwrap();
+
+        // New file should be considered changed
+        assert!(store.has_file_changed("new.md", 12345, "hash1").unwrap());
+
+        // Update state
+        store.update_file_state("new.md", 12345, "hash1".to_string()).unwrap();
+
+        // Same file should not be changed
+        assert!(!store.has_file_changed("new.md", 12345, "hash1").unwrap());
+
+        // Different modification time should be changed
+        assert!(store.has_file_changed("new.md", 12346, "hash1").unwrap());
+
+        // Different hash should be changed
+        assert!(store.has_file_changed("new.md", 12345, "hash2").unwrap());
+    }
+
+    #[test]
+    fn test_state_store_remove_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().join("test_notes2vec");
+        let config = Config::new(Some(base_dir)).unwrap();
+        config.init().unwrap();
+
+        let store = StateStore::open(&config).unwrap();
+
+        // Add file
+        store.update_file_state("test.md", 12345, "hash123".to_string()).unwrap();
+        assert!(store.get_file_state("test.md").unwrap().is_some());
+
+        // Remove file
+        store.remove_file("test.md").unwrap();
+        assert!(store.get_file_state("test.md").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_state_store_remove_nonexistent_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().join("test_notes2vec");
+        let config = Config::new(Some(base_dir)).unwrap();
+        config.init().unwrap();
+
+        let store = StateStore::open(&config).unwrap();
+
+        // Removing non-existent file should not error
+        store.remove_file("nonexistent.md").unwrap();
+    }
+
+    #[test]
+    fn test_calculate_file_hash() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+
+        // Create file with content
+        fs::write(&test_file, "Hello, world!").unwrap();
+
+        let hash1 = calculate_file_hash(&test_file).unwrap();
+        assert!(!hash1.is_empty());
+        assert_eq!(hash1.len(), 64); // SHA256 produces 64 hex characters
+
+        // Same content should produce same hash
+        let hash2 = calculate_file_hash(&test_file).unwrap();
+        assert_eq!(hash1, hash2);
+
+        // Different content should produce different hash
+        fs::write(&test_file, "Different content").unwrap();
+        let hash3 = calculate_file_hash(&test_file).unwrap();
+        assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_calculate_file_hash_empty_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("empty.txt");
+
+        fs::write(&test_file, "").unwrap();
+
+        let hash = calculate_file_hash(&test_file).unwrap();
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_calculate_file_hash_large_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("large.txt");
+
+        // Create a file larger than buffer size (8192 bytes)
+        let content = "x".repeat(10000);
+        fs::write(&test_file, content).unwrap();
+
+        let hash = calculate_file_hash(&test_file).unwrap();
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn test_get_file_modified_time() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.txt");
+
+        fs::write(&test_file, "Test content").unwrap();
+
+        let time1 = get_file_modified_time(&test_file).unwrap();
+        assert!(time1 > 0);
+
+        // Wait a bit and modify file
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        fs::write(&test_file, "Modified content").unwrap();
+
+        let time2 = get_file_modified_time(&test_file).unwrap();
+        assert!(time2 >= time1);
+    }
+
+    #[test]
+    fn test_get_file_modified_time_nonexistent() {
+        let result = get_file_modified_time(std::path::Path::new("/nonexistent/file.txt"));
+        assert!(result.is_err());
+    }
 }
 
