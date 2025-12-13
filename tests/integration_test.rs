@@ -1,8 +1,6 @@
-use notes2vec::config::Config;
-use notes2vec::discovery::discover_files;
-use notes2vec::error::Result;
-use notes2vec::parser::parse_markdown_file;
-use notes2vec::state::{calculate_file_hash, get_file_modified_time, StateStore};
+use notes2vec::{Config, discover_files, Result};
+use notes2vec::indexing::parser::parse_markdown_file;
+use notes2vec::{StateStore, calculate_file_hash, get_file_modified_time};
 use std::fs;
 use tempfile::TempDir;
 

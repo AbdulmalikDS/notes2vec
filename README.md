@@ -65,48 +65,42 @@ This continuously monitors your notes and automatically updates the index when f
 ## Stack
 
 - **Language**: Rust
-- **ML Framework**: Candle 
-- **Embedding Model**: nomic-embed-text-v1.5 quantized, 8-bit
-- **Vector Database**: LanceDB 
-- **State Management**: redb 
+- **ML Framework**: Candle
+- **Embedding Model**: sentence-transformers/all-MiniLM-L6-v2 (384-dimensional embeddings)
+- **Vector Storage**: redb (local key-value database)
+- **State Management**: redb (file change tracking)
 
 ## Project Status
 
-**Early Development** - This project is currently in active development.
+**✅ Fully Functional** - All core features are implemented and working.
 
-### Current Implementation Status
+### Implementation Status
 
 ✅ **Completed:**
-- CLI structure and command parsing
+- CLI structure and command parsing (`init`, `index`, `search`, `watch`)
 - Configuration management
 - File discovery (Markdown files with .gitignore support)
 - Markdown parsing (frontmatter, chunks, headers)
 - State management (file change tracking with redb)
-- Basic indexing workflow
-
-🚧 **In Progress / TODO:**
-- Embedding generation (Candle integration)
-- Vector database storage (LanceDB integration pending dependency fix)
-- Model downloading/loading
-- Search functionality
-- Watch/daemon mode
+- Embedding generation (BERT model via Candle)
+- Model downloading/loading from HuggingFace Hub
+- Vector database storage (redb-based)
+- Semantic search functionality
+- Watch/daemon mode (automatic re-indexing)
 
 ## Testing
 
-Quick test:
 ```bash
 # Build the project
 cargo build
 
-# Run unit tests
+# Run all tests
 cargo test
 
-# Run integration tests
-cargo test --test integration_test
-
-# Manual testing
-cargo run -- init --base-dir ./test_data
-cargo run -- index ./path/to/notes
+# Quick manual test
+cargo run -- init --base-dir ~/.notes2vec/test_data
+cargo run -- index ./test_notes --base-dir ~/.notes2vec/test_data
+cargo run -- search "your query" --base-dir ~/.notes2vec/test_data
 ```
 
 ## License
