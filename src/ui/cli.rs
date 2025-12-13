@@ -5,9 +5,27 @@ use clap::{Parser, Subcommand};
 #[command(name = "notes2vec")]
 #[command(about = "A lightweight, local-first semantic search engine for personal notes", long_about = None)]
 #[command(version)]
+#[command(subcommand_required = false)]
+#[command(arg_required_else_help = false)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+    
+    /// Search query (when used without subcommand - opens TUI if empty)
+    #[arg(value_name = "QUERY")]
+    pub query: Option<String>,
+    
+    /// Maximum number of results to return
+    #[arg(short, long, default_value_t = 10)]
+    pub limit: usize,
+    
+    /// Custom base directory (default: ~/.notes2vec)
+    #[arg(long)]
+    pub base_dir: Option<String>,
+    
+    /// Use interactive TUI mode
+    #[arg(short, long)]
+    pub interactive: bool,
 }
 
 #[derive(Subcommand, Debug)]

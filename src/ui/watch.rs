@@ -1,8 +1,10 @@
 use crate::core::config::Config;
 use crate::core::error::{Error, Result};
+use crate::indexing::discovery::is_notes_file;
 use crate::indexing::parser::parse_markdown_file;
+use crate::search::model::EmbeddingModel;
 use crate::storage::state::{calculate_file_hash, get_file_modified_time, StateStore};
-use crate::storage::vectors::VectorStore;
+use crate::storage::vectors::{VectorEntry, VectorStore};
 use notify_debouncer_full::{
     new_debouncer,
     notify::{RecursiveMode, Watcher},
@@ -83,12 +85,23 @@ impl FileWatcher {
     ) -> Result<()> {
         let state_store = StateStore::open(config)?;
         let vector_store = VectorStore::open(config)?;
+        
+        // Initialize model once for all files in this batch
+        // This avoids expensive re-initialization on every file change
+        let model = match EmbeddingModel::init_verbose(config) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("⚠ Warning: Failed to initialize embedding model: {}", e);
+                eprintln!("  Skipping file indexing in this batch.");
+                return Ok(());
+            }
+        };
 
         for event in events {
             // DebouncedEvent contains paths (plural) - iterate through them
             for path in &event.paths {
-                // Only process Markdown files
-                if !is_markdown_file(path) {
+                // Only process supported notes files
+                if !is_notes_file(path) {
                     continue;
                 }
 
@@ -96,12 +109,18 @@ impl FileWatcher {
                 if !path.exists() {
                     // File was deleted - remove from index
                     if let Ok(relative_path) = path.strip_prefix(root_path) {
-                        let file_path_str = relative_path.to_str().unwrap_or("");
+                        let file_path_str = match relative_path.to_str() {
+                            Some(s) => s,
+                            None => {
+                                eprintln!("⚠ Warning: Skipping deleted file with invalid UTF-8 path: {}", relative_path.display());
+                                continue;
+                            }
+                        };
                         if let Err(e) = vector_store.remove_file(file_path_str) {
-                            eprintln!("⚠ Warning: Failed to remove deleted file from index: {}", e);
+                            eprintln!("⚠ Warning: Failed to remove deleted file from index ({}): {}", relative_path.display(), e);
                         }
                         if let Err(e) = state_store.remove_file(file_path_str) {
-                            eprintln!("⚠ Warning: Failed to remove deleted file from state: {}", e);
+                            eprintln!("⚠ Warning: Failed to remove deleted file from state ({}): {}", relative_path.display(), e);
                         }
                         println!("  ✗ Removed deleted file: {}", relative_path.display());
                     }
@@ -111,7 +130,13 @@ impl FileWatcher {
                 // Process file
                 match path.strip_prefix(root_path) {
                     Ok(relative_path) => {
-                        let file_path_str = relative_path.to_str().unwrap_or("");
+                        let file_path_str = match relative_path.to_str() {
+                            Some(s) => s,
+                            None => {
+                                eprintln!("⚠ Warning: Skipping file with invalid UTF-8 path: {}", relative_path.display());
+                                continue;
+                            }
+                        };
                         
                         // Check if file has changed
                         match (get_file_modified_time(path), calculate_file_hash(path)) {
@@ -126,7 +151,7 @@ impl FileWatcher {
                                 }
 
                                 // Index the file
-                                match Self::index_file_static(path, file_path_str, &state_store, &vector_store, config) {
+                                match Self::index_file_static(path, file_path_str, &state_store, &vector_store, &model) {
                                     Ok(_) => {
                                         // Update state
                                         if let Err(e) = state_store.update_file_state(
@@ -142,8 +167,11 @@ impl FileWatcher {
                                     }
                                 }
                             }
-                            _ => {
-                                eprintln!("  ⚠ Warning: Could not get file info for {}", relative_path.display());
+                            (Err(e), _) => {
+                                eprintln!("  ⚠ Warning: Could not get modification time for {}: {}", relative_path.display(), e);
+                            }
+                            (_, Err(e)) => {
+                                eprintln!("  ⚠ Warning: Could not calculate hash for {}: {}", relative_path.display(), e);
                             }
                         }
                     }
@@ -164,7 +192,7 @@ impl FileWatcher {
         file_path_str: &str,
         _state_store: &StateStore,
         vector_store: &VectorStore,
-        config: &Config,
+        model: &EmbeddingModel,
     ) -> Result<()> {
         // Remove old vectors
         let _ = vector_store.remove_file(file_path_str);
@@ -172,16 +200,13 @@ impl FileWatcher {
         // Parse file
         let doc = parse_markdown_file(path)?;
 
-        // Load embedding model
-        let model = crate::model::EmbeddingModel::init(config)?;
-
-        // Process chunks
+        // Process chunks (model is already initialized and passed in)
         let chunks_to_embed: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
         let embeddings = model.embed(&chunks_to_embed)?;
 
         // Store vectors
         for (i, (chunk, embedding)) in doc.chunks.iter().zip(embeddings.iter()).enumerate() {
-            let vector_entry = crate::vectors::VectorEntry::new(
+            let vector_entry = VectorEntry::new(
                 file_path_str.to_string(),
                 chunk.chunk_index,
                 embedding.clone(),
@@ -199,18 +224,5 @@ impl FileWatcher {
         println!("  ✓ Indexed: {} ({} chunks)", file_path_str, doc.chunks.len());
         Ok(())
     }
-}
-
-/// Check if a file is a Markdown file
-fn is_markdown_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            matches!(
-                ext.to_lowercase().as_str(),
-                "md" | "markdown" | "mdown" | "mkd" | "mkdn"
-            )
-        })
-        .unwrap_or(false)
 }
 
