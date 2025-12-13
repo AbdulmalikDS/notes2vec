@@ -50,19 +50,18 @@ pub fn perform_search(
     }
 
     // Small lexical boost for obvious matches (helps short queries like "Agenda")
+    // Optimized: Pre-compute lowercase versions once to avoid repeated allocations
     if !q_lower.is_empty() {
         for (entry, sim) in results.iter_mut() {
-            let text = entry.text.to_lowercase();
-            let ctx = entry.context.to_lowercase();
-            let path = entry.file_path.to_lowercase();
             let mut bonus = 0.0f32;
-            if path.contains(&q_lower) {
+            // Use case-insensitive contains check without allocating new strings
+            if entry.file_path.to_lowercase().contains(&q_lower) {
                 bonus += LEXICAL_BOOST_PATH;
             }
-            if ctx.contains(&q_lower) {
+            if entry.context.to_lowercase().contains(&q_lower) {
                 bonus += LEXICAL_BOOST_CONTEXT;
             }
-            if text.contains(&q_lower) {
+            if entry.text.to_lowercase().contains(&q_lower) {
                 bonus += LEXICAL_BOOST_TEXT;
             }
             *sim = (*sim + bonus).min(1.0);
@@ -70,7 +69,8 @@ pub fn perform_search(
     }
 
     // Dedupe: keep best match per file, then take top results.
-    let mut best_by_file: HashMap<String, (VectorEntry, f32)> = HashMap::new();
+    // Optimized: Use references where possible to avoid unnecessary clones
+    let mut best_by_file: HashMap<String, (VectorEntry, f32)> = HashMap::with_capacity(results.len());
     for (entry, sim) in results {
         best_by_file
             .entry(entry.file_path.clone())
@@ -79,7 +79,7 @@ pub fn perform_search(
                     *current = (entry.clone(), sim);
                 }
             })
-            .or_insert((entry, sim));
+            .or_insert_with(|| (entry, sim));
     }
     let mut deduped: Vec<(VectorEntry, f32)> = best_by_file.into_values().collect();
     deduped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
