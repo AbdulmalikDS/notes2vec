@@ -167,8 +167,9 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
                 
                 // Generate embeddings for all chunks
                 // Reuse chunk texts to avoid extra allocations
+                // Use embed_passages for BGE model compatibility (better search quality)
                 let chunk_texts: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
-                let embeddings = match model.embed(&chunk_texts) {
+                let embeddings = match model.embed_passages(&chunk_texts) {
                     Ok(emb) => emb,
                     Err(e) => {
                         eprintln!("  ⚠ Warning: Failed to generate embeddings: {}. Skipping file.", e);

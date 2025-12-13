@@ -3,17 +3,18 @@ mod search;
 use crate::core::config::Config;
 use crate::core::error::{Error, Result};
 use crate::indexing::discovery::discover_files;
+use crate::indexing::parser::parse_markdown_file;
 use crate::search::model::{EmbeddingModel, EMBEDDING_MODEL_ID};
 use crate::storage::state::{calculate_file_hash, get_file_modified_time, StateStore};
 use crate::storage::vectors::{VectorEntry, VectorStore};
-use search::{perform_search, parse_file_filter_query};
+use search::{perform_search, parse_file_filter_query, MAX_RESULTS_DISPLAYED};
 use crossterm::cursor;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
@@ -23,7 +24,48 @@ use std::collections::HashSet;
 
 // TUI configuration constants
 const MAX_PREVIEW_LINES: usize = 200;           // Maximum lines to show in details preview
-const MAX_RESULTS_DISPLAYED: usize = 5;         // Maximum number of results to display (re-exported from search module)
+
+// Warm Industrial - Claude Code Style
+mod colors {
+    use ratatui::style::Color;
+    
+    // Main Background
+    pub const BG: Color = Color::Rgb(31, 31, 31);          // #1F1F1F - Matte Dark Charcoal
+    
+    // Primary Text
+    pub const TEXT: Color = Color::Rgb(238, 238, 238);     // #EEEEEE - Off-White/Pale Grey, high readability
+    
+    // Secondary Text (metadata, hints)
+    pub const MUTED: Color = Color::Rgb(136, 136, 136);    // #888888 - Dimmed Grey
+    
+    // Directories
+    pub const DIRECTORY: Color = Color::Rgb(238, 238, 238); // #EEEEEE - Same as primary text
+    
+    // Primary Accent - Burnt Orange/Coral
+    pub const ACCENT: Color = Color::Rgb(217, 121, 95);    // #D9795F - Burnt Orange (primary)
+    
+    // Borders & Section Headers (use accent color)
+    pub const BORDER: Color = Color::Rgb(217, 121, 95);    // #D9795F - Burnt Orange
+    
+    // Logo & ASCII Art
+    pub const LOGO: Color = Color::Rgb(238, 238, 238);     // #EEEEEE - Off-White
+    
+    // Selection Highlight (Burnt Orange background, Black text)
+    pub const SELECTION_BG: Color = Color::Rgb(217, 121, 95); // #D9795F - Burnt Orange background
+    pub const SELECTION_TEXT: Color = Color::Rgb(0, 0, 0);    // #000000 - Black text on selection
+    
+    // Status Bar
+    pub const STATUS_BG: Color = Color::Rgb(31, 31, 31);    // #1F1F1F - Same as background
+    pub const STATUS_TEXT: Color = Color::Rgb(136, 136, 136); // #888888 - Dimmed Grey
+    
+    // Action Keys (use accent for consistency)
+    pub const KEY_ENTER: Color = Color::Rgb(217, 121, 95);  // #D9795F - Burnt Orange
+    pub const KEY_QUIT: Color = Color::Rgb(217, 121, 95);   // #D9795F - Burnt Orange
+    pub const KEY_ESC: Color = Color::Rgb(217, 121, 95);    // #D9795F - Burnt Orange
+    
+    // Title (uses accent color)
+    pub const TITLE: Color = Color::Rgb(217, 121, 95);     // #D9795F - Burnt Orange
+}
 
 /// Screen states for the TUI flow
 #[derive(PartialEq)]
@@ -165,7 +207,10 @@ impl SearchTui {
                     match self.current_screen {
                         Screen::Welcome => {
                             match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => {
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    should_quit = true;
+                                }
+                                KeyCode::Esc => {
                                     should_quit = true;
                                 }
                                 KeyCode::Enter => {
@@ -178,7 +223,7 @@ impl SearchTui {
                         }
                         Screen::DirectorySelection => {
                             match key.code {
-                                KeyCode::Char('q') => {
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                     should_quit = true;
                                 }
                                 KeyCode::Esc => {
@@ -230,9 +275,8 @@ impl SearchTui {
                                                 self.dir_selected = sel;
                                             }
                                         } else {
-                                            // Selected a note file: start search in the current directory
-                                            let current_dir_clone = self.current_dir.clone();
-                                            self.select_directory(&current_dir_clone)?;
+                                            // Selected a note file: start search in ONLY this file
+                                            self.select_file(&selected_path_clone)?;
                                         }
                                     } else {
                                         // No selection - treat as "search here"
@@ -257,15 +301,22 @@ impl SearchTui {
                         }
                         Screen::Search => {
                             match key.code {
-                                KeyCode::Char('q') => {
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    // Ctrl+C always quits, even when typing
                                     should_quit = true;
                                 }
                                 KeyCode::Esc => {
-                                    // Always go back to directory selection
-                                    self.current_screen = Screen::DirectorySelection;
-                                    self.search_mode = true;
-                                    self.query.clear();
-                                    self.results.clear();
+                                    if self.search_mode {
+                                        // Exit search mode, clear query
+                                        self.search_mode = false;
+                                        self.query.clear();
+                                        self.results.clear();
+                                    } else {
+                                        // Go back to directory selection
+                                        self.current_screen = Screen::DirectorySelection;
+                                        self.query.clear();
+                                        self.results.clear();
+                                    }
                                 }
                                 KeyCode::Enter if !self.search_mode => {
                                     // Enter edit mode (keep existing query so user can tweak it)
@@ -281,6 +332,7 @@ impl SearchTui {
                                     self.query.clear();
                                 }
                                 KeyCode::Char(c) if self.search_mode => {
+                                    // Allow typing 'q' and any other character when in search mode
                                     self.query.push(c);
                                 }
                                 KeyCode::Char(c) if !self.search_mode => {
@@ -316,7 +368,104 @@ impl SearchTui {
         Ok(())
     }
     
-    /// Select a directory and initialize search
+    /// Select a single file and initialize search (search only in this file)
+    fn select_file(&mut self, file_path: &Path) -> Result<()> {
+        // IMPORTANT: never let indexing/search setup errors kill the TUI loop.
+        let res: Result<()> = (|| {
+            // TUI must not print while in raw/alternate screen mode.
+            let model = EmbeddingModel::init_quiet(&self.config)?;
+            self.model_ready = model.is_model_loaded();
+
+            if !self.model_ready {
+                let model_path = self.config.models_dir.join("model.safetensors");
+                let tokenizer_path = self.config.models_dir.join("tokenizer.json");
+                let config_path = self.config.models_dir.join("config.json");
+                self.status_message = Some(format!(
+                    "Embedding model not loaded. Run: notes2vec init --base-dir {}  (missing: {}{}{})",
+                    self.config.base_dir.display(),
+                    if model_path.exists() { "" } else { "model.safetensors " },
+                    if tokenizer_path.exists() { "" } else { "tokenizer.json " },
+                    if config_path.exists() { "" } else { "config.json" },
+                ));
+                return Ok(());
+            }
+
+            let state_store = StateStore::open(&self.config)?;
+            let vector_store = VectorStore::open(&self.config)?;
+
+            // Get relative path - file_path is absolute, we need relative from current_dir
+            let relative_path = file_path.strip_prefix(&self.current_dir)
+                .map_err(|_| Error::Config("File path error".to_string()))?;
+            
+            let file_path_str = relative_path.to_str()
+                .ok_or_else(|| Error::Config("Invalid UTF-8 path".to_string()))?;
+            
+            // Normalize path separators (Windows uses backslashes, but we store with forward slashes)
+            let file_path_str = file_path_str.replace('\\', "/");
+
+            // Check if file needs indexing
+            let needs_indexing = match (get_file_modified_time(file_path), calculate_file_hash(file_path)) {
+                (Ok(modified_time), Ok(hash)) => {
+                    state_store.has_file_changed(&file_path_str, modified_time, &hash).unwrap_or(true)
+                }
+                _ => true,
+            };
+
+            if needs_indexing {
+                // Index this single file
+                let doc = parse_markdown_file(file_path)?;
+                let chunk_texts: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
+                // Use embed_passages for BGE model compatibility (better search quality)
+                let embeddings = model.embed_passages(&chunk_texts)?;
+
+                // Remove old vectors for this file
+                let _ = vector_store.remove_file(&file_path_str);
+
+                // Store new vectors
+                for (chunk, embedding) in doc.chunks.iter().zip(embeddings.iter()) {
+                    let vector_entry = VectorEntry::new(
+                        file_path_str.to_string(),
+                        chunk.chunk_index,
+                        embedding.clone(),
+                        chunk.text.clone(),
+                        chunk.context.clone(),
+                        chunk.start_line,
+                        chunk.end_line,
+                    );
+                    let _ = vector_store.insert(&vector_entry);
+                }
+
+                // Update state
+                if let (Ok(modified_time), Ok(hash)) = (get_file_modified_time(file_path), calculate_file_hash(file_path)) {
+                    let _ = state_store.update_file_state(&file_path_str, modified_time, hash);
+                }
+            }
+
+            // Set active_files to ONLY this file
+            self.active_files.clear();
+            self.active_files.insert(file_path_str.to_string());
+
+            // Store components
+            self.model = Some(model);
+            self.vector_store = Some(vector_store);
+
+            // Switch to search screen
+            self.current_screen = Screen::Search;
+            self.query.clear();
+            self.results.clear();
+            self.search_mode = true;
+
+            Ok(())
+        })();
+
+        if let Err(e) = res {
+            self.status_message = Some(format!("Error: {}", e));
+        }
+
+        Ok(())
+    }
+
+    /// Select a directory and initialize search (search in all files in directory)
     fn select_directory(&mut self, dir: &Path) -> Result<()> {
         // IMPORTANT: never let indexing/search setup errors kill the TUI loop.
         // We surface errors in the Directory Selection footer instead.
@@ -456,7 +605,7 @@ impl SearchTui {
         // Paint a consistent background so the UI doesn't depend on the user's terminal theme.
         // If the terminal doesn't support truecolor, this will be approximated.
         let size = f.size();
-        let background = Block::default().style(Style::default().bg(Color::Rgb(35, 35, 35)));
+        let background = Block::default().style(Style::default().bg(colors::BG));
         f.render_widget(background, size);
 
         match self.current_screen {
@@ -469,13 +618,11 @@ impl SearchTui {
     fn render_welcome(&self, f: &mut Frame) {
         let size = f.size();
 
-        // Welcome screen palette (RGB for consistency across terminals).
-        let header_color = Color::Rgb(214, 175, 0); // gold-ish
-        let art_color = Color::Rgb(80, 200, 200); // teal/cyan
-        let muted = Color::Rgb(140, 140, 140);
-        let key_enter = Color::Rgb(70, 200, 90);
-        let key_quit = Color::Rgb(235, 90, 90);
-        let key_bg = Color::Rgb(55, 55, 55);
+        // Welcome screen - Monochrome palette
+        let header_color = colors::LOGO; // Pure white for logo
+        let art_color = colors::LOGO; // Pure white for ASCII art
+        let muted = colors::STATUS_TEXT; // Medium-light gray for muted text
+        let key_bg = colors::BORDER; // Medium gray background for keys
         
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -513,17 +660,21 @@ impl SearchTui {
 
         // Clip logo lines so they don't spill when the terminal is narrow.
         let max_left = left_w.saturating_sub(1);
+        let padding = "  "; // Left padding for ASCII art
         let mut header_lines: Vec<Line> = logo_lines
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let clipped: String = line.chars().take(max_left).collect();
+                let clipped: String = line.chars().take(max_left.saturating_sub(padding.len())).collect();
                 let style = if logo_lines.len() == 2 && i == 1 {
                     Style::default().fg(muted).add_modifier(Modifier::ITALIC)
                 } else {
                     Style::default().fg(header_color).add_modifier(Modifier::BOLD)
                 };
-                Line::from(vec![Span::styled(clipped, style)])
+                Line::from(vec![
+                    Span::raw(padding),
+                    Span::styled(clipped, style),
+                ])
             })
             .collect();
 
@@ -638,7 +789,7 @@ impl SearchTui {
             Span::styled("[", Style::default().fg(muted)),
             Span::styled(
                 " Enter ",
-                Style::default().fg(key_enter).bg(key_bg).add_modifier(Modifier::BOLD),
+                Style::default().fg(colors::KEY_ENTER).bg(key_bg).add_modifier(Modifier::BOLD),
             ),
             Span::styled("]", Style::default().fg(muted)),
             Span::raw(" Select Directory  "),
@@ -646,8 +797,8 @@ impl SearchTui {
             Span::raw("  "),
             Span::styled("[", Style::default().fg(muted)),
             Span::styled(
-                " q ",
-                Style::default().fg(key_quit).bg(key_bg).add_modifier(Modifier::BOLD),
+                " Ctrl+C ",
+                Style::default().fg(colors::KEY_QUIT).bg(key_bg).add_modifier(Modifier::BOLD),
             ),
             Span::styled("]", Style::default().fg(muted)),
             Span::raw(" Quit"),
@@ -657,7 +808,7 @@ impl SearchTui {
         .block(
             Block::default()
                 .borders(Borders::TOP)
-                .border_style(Style::default().fg(muted)),
+                .border_style(Style::default().fg(colors::BORDER)),
         );
 
         f.render_widget(footer, chunks[1]);
@@ -676,11 +827,13 @@ impl SearchTui {
             ])
             .split(size);
 
-        // Title (top-left)
-        let title = Paragraph::new(Line::from(vec![Span::styled(
-            "notes2vec",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )]))
+        // Title (top-left) - no padding
+        let title = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "notes2vec",
+                Style::default().fg(colors::TITLE).add_modifier(Modifier::BOLD),
+            ),
+        ]))
         .block(Block::default().borders(Borders::NONE))
         .alignment(Alignment::Left);
         f.render_widget(title, chunks[0]);
@@ -691,10 +844,12 @@ impl SearchTui {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title("Select Notes Directory")
+                    .border_style(Style::default().fg(colors::BORDER))
+                    .title(vec![
+                        Span::styled("Select Notes Directory", Style::default().fg(colors::TEXT).add_modifier(Modifier::BOLD)),
+                    ])
             )
-            .style(Style::default().fg(Color::White));
+            .style(Style::default().fg(colors::TEXT));
 
         f.render_widget(path_para, chunks[1]);
 
@@ -713,11 +868,13 @@ impl SearchTui {
 
                 let style = if i == self.dir_selected {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
+                        .fg(colors::SELECTION_TEXT)
+                        .bg(colors::SELECTION_BG)
                         .add_modifier(Modifier::BOLD)
+                } else if path.is_dir() {
+                    Style::default().fg(colors::DIRECTORY)
                 } else {
-                    Style::default()
+                    Style::default().fg(colors::TEXT)
                 };
 
                 ListItem::new(Line::from(vec![Span::styled(display_name, style)]))
@@ -728,13 +885,15 @@ impl SearchTui {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::White))
-                    .title("Navigate")
+                    .border_style(Style::default().fg(colors::BORDER))
+                    .title(vec![
+                        Span::styled("Navigate", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
+                    ])
             )
             .highlight_style(
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(colors::SELECTION_TEXT)
+                    .bg(colors::SELECTION_BG)
                     .add_modifier(Modifier::BOLD),
             );
 
@@ -742,29 +901,29 @@ impl SearchTui {
         list_state.select(Some(self.dir_selected));
         f.render_stateful_widget(list, chunks[2], &mut list_state);
 
-        // Footer
+        // Footer (Status Bar)
         let mut footer_spans = vec![
-            Span::styled("↑↓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("↑↓", Style::default().fg(colors::KEY_ENTER).add_modifier(Modifier::BOLD)),
             Span::raw(": Navigate | "),
-            Span::styled("Enter", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled("Enter", Style::default().fg(colors::KEY_ENTER).add_modifier(Modifier::BOLD)),
             Span::raw(": Open | "),
-            Span::styled("s", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled("s", Style::default().fg(colors::KEY_ENTER).add_modifier(Modifier::BOLD)),
             Span::raw(": Search here | "),
-            Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled("Esc", Style::default().fg(colors::KEY_ESC).add_modifier(Modifier::BOLD)),
             Span::raw(": Back | "),
-            Span::styled("q", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled("Ctrl+C", Style::default().fg(colors::KEY_QUIT).add_modifier(Modifier::BOLD)),
             Span::raw(": Quit"),
         ];
 
         if let Some(msg) = &self.status_message {
             footer_spans.push(Span::raw("  |  "));
-            footer_spans.push(Span::styled(msg.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+            footer_spans.push(Span::styled(msg.clone(), Style::default().fg(colors::STATUS_TEXT).add_modifier(Modifier::BOLD)));
         }
 
         let footer = Paragraph::new(Line::from(footer_spans))
-        .style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().fg(colors::STATUS_TEXT))
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray)));
+        .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(colors::BORDER)).style(Style::default().bg(colors::STATUS_BG)));
 
         f.render_widget(footer, chunks[3]);
     }
@@ -783,11 +942,13 @@ impl SearchTui {
             ])
             .split(size);
 
-        // Title (top-left)
-        let title = Paragraph::new(Line::from(vec![Span::styled(
-            "notes2vec",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )]))
+        // Title (top-left) - no padding
+        let title = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "notes2vec",
+                Style::default().fg(colors::TITLE).add_modifier(Modifier::BOLD),
+            ),
+        ]))
         .block(Block::default().borders(Borders::NONE))
         .alignment(Alignment::Left);
         f.render_widget(title, chunks[0]);
@@ -796,32 +957,32 @@ impl SearchTui {
         let search_block = Block::default()
             .borders(Borders::ALL)
             .border_style(if self.search_mode {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(colors::TITLE)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(colors::BORDER)
             })
             .title(vec![
-                Span::styled("Search", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled("Search", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
             ]);
 
         let search_text = if self.query.is_empty() {
             vec![Span::styled(
                 "Type your search query...",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(colors::MUTED),
             )]
         } else {
             vec![Span::styled(
                 &self.query,
-                Style::default().fg(Color::White),
+                Style::default().fg(colors::TEXT),
             )]
         };
 
         let search_paragraph = Paragraph::new(Line::from(search_text))
             .block(search_block)
             .style(if self.search_mode {
-                Style::default().fg(Color::Yellow)
+                Style::default().fg(colors::TEXT)
             } else {
-                Style::default()
+                Style::default().fg(colors::TEXT)
             });
 
         f.render_widget(search_paragraph, chunks[1]);
@@ -834,14 +995,14 @@ impl SearchTui {
                     Line::from(vec![
                         Span::styled(
                             "Enter a search query above to find your notes",
-                            Style::default().fg(Color::White),
+                            Style::default().fg(colors::TEXT),
                         ),
                     ]),
                     Line::from(""),
                     Line::from(vec![
                         Span::styled(
                             "Search by meaning, not just keywords",
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(colors::MUTED),
                         ),
                     ]),
                 ]
@@ -850,9 +1011,9 @@ impl SearchTui {
                     Line::from(""),
                     Line::from(vec![
                         Span::styled(
-                            "No results found. Try a different query.",
-                            Style::default().fg(Color::White),
-                        ),
+                                "No results found. Try a different query.",
+                                Style::default().fg(colors::TEXT),
+                            ),
                     ]),
                     Line::from(""),
                 ]
@@ -862,8 +1023,10 @@ impl SearchTui {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::White))
-                        .title("Results"),
+                        .border_style(Style::default().fg(colors::BORDER))
+                        .title(vec![
+                            Span::styled("Results", Style::default().fg(colors::TEXT).add_modifier(Modifier::BOLD)),
+                        ]),
                 )
                 .alignment(Alignment::Center);
 
@@ -878,27 +1041,44 @@ impl SearchTui {
                 ])
                 .split(chunks[2]);
 
-            // Results list
+            // Results list - show chunk info when multiple results from same file
+            let file_counts: std::collections::HashMap<&String, usize> = self.results
+                .iter()
+                .map(|(entry, _)| &entry.file_path)
+                .fold(std::collections::HashMap::new(), |mut acc, path| {
+                    *acc.entry(path).or_insert(0) += 1;
+                    acc
+                });
+            
             let items: Vec<ListItem> = self
                 .results
                 .iter()
                 .enumerate()
                 .map(|(i, (entry, similarity))| {
                     let file_name = &entry.file_path;
+                    let count = file_counts.get(file_name).copied().unwrap_or(1);
+                    
+                    // Show chunk indicator if multiple results from same file
+                    let chunk_indicator = if count > 1 {
+                        format!(" (lines {}-{})", entry.start_line, entry.end_line)
+                    } else {
+                        String::new()
+                    };
 
                     let style = if i == self.selected {
                         Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Yellow)
+                            .fg(colors::SELECTION_TEXT)
+                            .bg(colors::SELECTION_BG)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default()
+                        Style::default().fg(colors::TEXT)
                     };
 
                     let similarity_pct = (similarity * 100.0) as u8;
                     ListItem::new(Line::from(vec![
                         Span::styled(format!("[{:3}%] ", similarity_pct), style),
                         Span::styled(file_name.to_string(), style),
+                        Span::styled(chunk_indicator, Style::default().fg(colors::MUTED)),
                     ]))
                 })
                 .collect();
@@ -907,16 +1087,16 @@ impl SearchTui {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::White))
+                        .border_style(Style::default().fg(colors::BORDER))
                         .title(vec![
-                            Span::styled("Results", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                            Span::styled("Results", Style::default().fg(colors::TEXT).add_modifier(Modifier::BOLD)),
                             Span::raw(format!(" ({} found)", self.results.len())),
                         ]),
                 )
                 .highlight_style(
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
+                        .fg(colors::SELECTION_TEXT)
+                        .bg(colors::SELECTION_BG)
                         .add_modifier(Modifier::BOLD),
                 );
 
@@ -944,17 +1124,17 @@ impl SearchTui {
         let footer_lines = if self.search_mode {
             vec![
                 Line::from(vec![
-                    Span::styled("Enter", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled("Enter", Style::default().fg(colors::KEY_ENTER).add_modifier(Modifier::BOLD)),
                     Span::raw(": Search  "),
-                    Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled("Esc", Style::default().fg(colors::KEY_ESC).add_modifier(Modifier::BOLD)),
                     Span::raw(": Back  "),
-                    Span::styled("Ctrl+U", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Ctrl+U", Style::default().fg(colors::STATUS_TEXT).add_modifier(Modifier::BOLD)),
                     Span::raw(": Clear  "),
-                    Span::styled("q", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled("Ctrl+C", Style::default().fg(colors::KEY_QUIT).add_modifier(Modifier::BOLD)),
                     Span::raw(": Quit"),
                 ]),
                 Line::from(vec![
-                    Span::styled("file:<name>", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled("file:<name>", Style::default().fg(colors::STATUS_TEXT)),
                     Span::raw(": filter results"),
                     Span::raw(filter_note),
                     Span::raw(model_note),
@@ -965,17 +1145,17 @@ impl SearchTui {
         } else {
             vec![
                 Line::from(vec![
-                    Span::styled("↑↓", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("↑↓", Style::default().fg(colors::KEY_ENTER).add_modifier(Modifier::BOLD)),
                     Span::raw(": Navigate  "),
-                    Span::styled("Enter", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled("Enter", Style::default().fg(colors::KEY_ENTER).add_modifier(Modifier::BOLD)),
                     Span::raw(": Edit  "),
-                    Span::styled("Esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::styled("Esc", Style::default().fg(colors::KEY_ESC).add_modifier(Modifier::BOLD)),
                     Span::raw(": Back  "),
-                    Span::styled("q", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled("Ctrl+C", Style::default().fg(colors::KEY_QUIT).add_modifier(Modifier::BOLD)),
                     Span::raw(": Quit"),
                 ]),
                 Line::from(vec![
-                    Span::styled("file:<name>", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                    Span::styled("file:<name>", Style::default().fg(colors::STATUS_TEXT)),
                     Span::raw(": filter results"),
                     Span::raw(filter_note),
                     Span::raw(model_note),
@@ -986,12 +1166,13 @@ impl SearchTui {
         };
 
         let footer = Paragraph::new(footer_lines)
-            .style(Style::default().fg(Color::DarkGray))
+            .style(Style::default().fg(colors::STATUS_TEXT))
             .alignment(Alignment::Center)
             .block(
                 Block::default()
                     .borders(Borders::TOP)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(colors::BORDER))
+                    .style(Style::default().bg(colors::STATUS_BG)),
             );
 
         f.render_widget(footer, chunks[3]);
@@ -1004,34 +1185,34 @@ impl SearchTui {
 
         let mut lines = vec![
             Line::from(vec![
-                Span::styled("File: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(&entry.file_path, Style::default().fg(Color::White)),
+                Span::styled("File: ", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(&entry.file_path, Style::default().fg(colors::MUTED)),
             ]),
             Line::from(vec![
-                Span::styled("Match: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{}%", similarity_pct), Style::default().fg(Color::Green)),
+                Span::styled("Match: ", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{}%", similarity_pct), Style::default().fg(colors::TEXT)),
                 Span::raw("  "),
-                Span::styled("cos:", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:.3}", similarity), Style::default().fg(Color::DarkGray)),
+                Span::styled("cos:", Style::default().fg(colors::MUTED)),
+                Span::styled(format!("{:.3}", similarity), Style::default().fg(colors::MUTED)),
             ]),
             Line::from(vec![
-                Span::styled("Lines: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Lines: ", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!("{}-{}", start_line, end_line),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(colors::TEXT),
                 ),
             ]),
             if entry.context.trim().is_empty() {
                 Line::from("")
             } else {
                 Line::from(vec![
-                    Span::styled("Context: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                    Span::styled(entry.context.clone(), Style::default().fg(Color::White)),
+                    Span::styled("Context: ", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
+                    Span::styled(entry.context.clone(), Style::default().fg(colors::TEXT)),
                 ])
             },
             Line::from(""),
             Line::from(vec![
-                Span::styled("Content:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Content:", Style::default().fg(colors::ACCENT).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(""),
         ];
@@ -1042,14 +1223,14 @@ impl SearchTui {
         for line in preview_lines {
             lines.push(Line::from(vec![Span::styled(
                 line.to_string(),
-                Style::default().fg(Color::White),
+                Style::default().fg(colors::TEXT),
             )]));
         }
 
         if entry.text.lines().count() > MAX_PREVIEW_LINES {
             lines.push(Line::from(vec![Span::styled(
                 "... (truncated)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(colors::MUTED),
             )]));
         }
 
@@ -1057,8 +1238,10 @@ impl SearchTui {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan))
-                    .title("Details"),
+                    .border_style(Style::default().fg(colors::BORDER))
+                    .title(vec![
+                        Span::styled("Details", Style::default().fg(colors::TEXT).add_modifier(Modifier::BOLD)),
+                    ]),
             )
             .wrap(Wrap { trim: false })
     }

@@ -2,15 +2,11 @@
 
 A lightweight, local-first semantic search engine for personal notes, journals, and documentation.
 
+![notes2vec in action](assets/notes2vec.gif)
+
 ## Overview
 
 notes2vec helps you find your personal notes based on meaning, not just keywords. Unlike traditional search tools that require exact word matches, notes2vec understands what you're looking for even if you use different words than what you wrote.
-
-## Demo
-
-![notes2vec in action](demo.gif)
-
-*Example: Searching through notes using semantic search*
 
 ## Features
 

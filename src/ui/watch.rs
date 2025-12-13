@@ -202,7 +202,8 @@ impl FileWatcher {
 
         // Process chunks (model is already initialized and passed in)
         let chunks_to_embed: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
-        let embeddings = model.embed(&chunks_to_embed)?;
+        // Use embed_passages for BGE model compatibility (better search quality)
+        let embeddings = model.embed_passages(&chunks_to_embed)?;
 
         // Store vectors - pre-allocate entries for better performance
         let mut entries_to_insert = Vec::with_capacity(doc.chunks.len());

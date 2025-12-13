@@ -5,9 +5,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 // Search configuration constants
-const SEARCH_CANDIDATES_LIMIT: usize = 50;      // Number of candidates to fetch for unconstrained search
-const SCOPED_SEARCH_CANDIDATES_LIMIT: usize = 200; // Number of candidates for scoped search
-const MAX_RESULTS_DISPLAYED: usize = 5;         // Maximum number of results to display
+const SEARCH_CANDIDATES_LIMIT: usize = 200;      // Number of candidates to fetch for unconstrained search
+const SCOPED_SEARCH_CANDIDATES_LIMIT: usize = 500; // Number of candidates for scoped search
+pub const MAX_RESULTS_DISPLAYED: usize = 20;     // Maximum number of results to display (top 20 passages)
+const MAX_RESULTS_PER_FILE: usize = 5;           // Maximum results per file (allows multiple chunks from same file)
 
 // Lexical boost values for search results
 const LEXICAL_BOOST_PATH: f32 = 0.05;   // Boost for filename matches
@@ -38,10 +39,14 @@ pub fn perform_search(
 
     let query_embedding = &query_embeddings[0];
     // Get more candidates, then scope + boost + dedupe to top results (better UX).
+    // For scoped searches, fetch even more candidates to ensure we get enough results
     let mut results = if active_files.is_empty() {
         vector_store.search(query_embedding, SEARCH_CANDIDATES_LIMIT)?
     } else {
-        vector_store.search_scoped(query_embedding, SCOPED_SEARCH_CANDIDATES_LIMIT, active_files)?
+        // For scoped search, fetch enough candidates to get top passages
+        // Multiply by MAX_RESULTS_PER_FILE to ensure we get multiple chunks per file
+        let candidate_limit = (MAX_RESULTS_DISPLAYED * MAX_RESULTS_PER_FILE).max(SCOPED_SEARCH_CANDIDATES_LIMIT);
+        vector_store.search_scoped(query_embedding, candidate_limit, active_files)?
     };
 
     // Optional: limit results to a specific file (or partial filename).
@@ -68,26 +73,36 @@ pub fn perform_search(
         }
     }
 
-    // Dedupe: keep best match per file, then take top results.
-    // Optimized: Avoid unnecessary clones by only cloning when updating
-    let mut best_by_file: HashMap<String, (VectorEntry, f32)> = HashMap::with_capacity(results.len());
+    // Smart deduplication: allow multiple results per file (up to MAX_RESULTS_PER_FILE)
+    // This allows users to see multiple relevant chunks from the same file
+    // Group results by file, keep top N per file, then take overall top results
+    let mut results_by_file: HashMap<String, Vec<(VectorEntry, f32)>> = HashMap::new();
+    
     for (entry, sim) in results {
-        match best_by_file.get_mut(&entry.file_path) {
-            Some(current) => {
-                if sim > current.1 {
-                    *current = (entry, sim);
-                }
-            }
-            None => {
-                best_by_file.insert(entry.file_path.clone(), (entry, sim));
-            }
-        }
+        results_by_file
+            .entry(entry.file_path.clone())
+            .or_insert_with(Vec::new)
+            .push((entry, sim));
     }
-    let mut deduped: Vec<(VectorEntry, f32)> = best_by_file.into_values().collect();
-    deduped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    deduped.truncate(MAX_RESULTS_DISPLAYED);
+    
+    // Sort each file's results by similarity (descending) and keep top N per file
+    for file_results in results_by_file.values_mut() {
+        file_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        file_results.truncate(MAX_RESULTS_PER_FILE);
+    }
+    
+    // Flatten and sort all results by similarity
+    let mut all_results: Vec<(VectorEntry, f32)> = results_by_file
+        .into_values()
+        .flatten()
+        .collect();
+    
+    all_results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    
+    // Return top 20 passages (or all if less than 20)
+    all_results.truncate(MAX_RESULTS_DISPLAYED);
 
-    Ok(deduped)
+    Ok(all_results)
 }
 
 /// Parse query string to extract file filter and semantic query
