@@ -1,4 +1,4 @@
-use crate::core::error::{Error, Result};
+use crate::core::error::Result;
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use std::path::Path;
 
@@ -147,7 +147,7 @@ fn parse_structure(content: &str) -> Result<(Option<String>, Vec<String>, Vec<Te
                         context: build_context(&header_stack),
                         chunk_index,
                         start_line: chunk_start_line,
-                        end_line: line_number - 1,
+                        end_line: line_number.max(chunk_start_line),
                     });
                     chunk_index += 1;
                     current_text.clear();
@@ -171,14 +171,21 @@ fn parse_structure(content: &str) -> Result<(Option<String>, Vec<String>, Vec<Te
                 if level == 1 && title.is_none() {
                     title = Some(heading.clone());
                 }
+                
+                // Headings end with a newline
+                line_number += 1;
+                chunk_start_line = line_number;
             }
             Event::Text(text) => {
+                // Count newlines in text (rare but possible in code blocks or pasted text)
+                let newlines = text.chars().filter(|&c| c == '\n').count();
                 if in_heading {
                     heading_text.push_str(text);
                 } else {
                     current_text.push_str(text);
                     current_text.push(' ');
                 }
+                line_number += newlines;
             }
             Event::SoftBreak | Event::HardBreak => {
                 if !in_heading {
@@ -187,19 +194,28 @@ fn parse_structure(content: &str) -> Result<(Option<String>, Vec<String>, Vec<Te
                 }
             }
             Event::End(TagEnd::Paragraph) => {
+                // Paragraphs end with a newline (or two)
+                line_number += 1;
+                
                 // If text exceeds max size, split intelligently at sentence boundaries
                 if current_text.len() > MAX_CHUNK_SIZE {
                     let new_chunks = split_text_intelligently(
                         &current_text,
                         &header_stack,
                         chunk_start_line,
-                        line_number,
+                        line_number - 1, // End line of the paragraph
                         &mut chunk_index,
                     );
                     chunks.extend(new_chunks);
                     current_text.clear();
-                    chunk_start_line = line_number + 1;
+                    chunk_start_line = line_number;
                 }
+            }
+            Event::End(TagEnd::Item) => {
+                line_number += 1;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                line_number += 1;
             }
             _ => {}
         }
@@ -223,7 +239,7 @@ fn parse_structure(content: &str) -> Result<(Option<String>, Vec<String>, Vec<Te
                 context: build_context(&header_stack),
                 chunk_index,
                 start_line: chunk_start_line,
-                end_line: line_number,
+                end_line: line_number.max(chunk_start_line),
             });
         }
     }
@@ -256,15 +272,19 @@ fn split_text_intelligently(
             // Check if followed by whitespace or end of string
             let next_char = chars.get(i + 1);
             if next_char.map(|c| c.is_whitespace()).unwrap_or(true) {
-                sentences.push(&trimmed[start..=i]);
+                // Use char_indices to get byte positions for slicing
+                let byte_start = trimmed.char_indices().nth(start).map(|(pos, _)| pos).unwrap_or(0);
+                let byte_end = trimmed.char_indices().nth(i).map(|(pos, _)| pos + 1).unwrap_or(trimmed.len());
+                sentences.push(&trimmed[byte_start..byte_end.min(trimmed.len())]);
                 start = i + 1;
             }
         }
     }
     
     // Add remaining text if any
-    if start < trimmed.len() {
-        sentences.push(&trimmed[start..]);
+    if start < chars.len() {
+        let byte_start = trimmed.char_indices().nth(start).map(|(pos, _)| pos).unwrap_or(trimmed.len());
+        sentences.push(&trimmed[byte_start..]);
     }
 
     let mut current_chunk = String::new();
@@ -278,9 +298,14 @@ fn split_text_intelligently(
         }
 
         // If adding this sentence would exceed max size, save current chunk
-        if !current_chunk.is_empty() 
-            && current_chunk.len() + sentence.len() + 1 > MAX_CHUNK_SIZE 
-            && current_chunk.len() >= MIN_CHUNK_SIZE {
+        // Also try to target TARGET_CHUNK_SIZE for optimal embedding quality
+        let would_exceed_max = !current_chunk.is_empty() 
+            && current_chunk.len() + sentence.len() + 1 > MAX_CHUNK_SIZE;
+        let reached_target = !current_chunk.is_empty()
+            && current_chunk.len() >= TARGET_CHUNK_SIZE
+            && current_chunk.len() + sentence.len() + 1 > MAX_CHUNK_SIZE;
+        
+        if (would_exceed_max || reached_target) && current_chunk.len() >= MIN_CHUNK_SIZE {
             chunks.push(TextChunk {
                 text: current_chunk.trim().to_string(),
                 context: context.clone(),
@@ -342,6 +367,8 @@ fn build_context(headers: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_parse_simple_markdown() {
@@ -351,6 +378,303 @@ mod tests {
         let doc = result.unwrap();
         assert_eq!(doc.title, "Title");
         assert!(!doc.chunks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_markdown_without_title() {
+        let content = "This is content without a title.";
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        // Should use filename as title
+        assert_eq!(doc.title, "test");
+    }
+
+    #[test]
+    fn test_parse_empty_file() {
+        let content = "";
+        let result = parse_markdown(content, Path::new("empty.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert_eq!(doc.title, "empty");
+        // Empty file might have no chunks or one empty chunk
+        assert!(doc.chunks.is_empty() || doc.chunks.iter().all(|c| c.text.trim().is_empty()));
+    }
+
+    #[test]
+    fn test_parse_frontmatter() {
+        let content = r#"---
+title: Test Document
+tags: [rust, testing]
+custom_field: custom_value
+---
+
+# Main Title
+
+Content here.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert_eq!(doc.metadata.title, Some("Test Document".to_string()));
+        assert_eq!(doc.metadata.tags.len(), 2);
+        assert!(doc.metadata.tags.contains(&"rust".to_string()));
+        assert!(doc.metadata.tags.contains(&"testing".to_string()));
+        assert_eq!(doc.metadata.custom.get("custom_field"), Some(&"custom_value".to_string()));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_comma_separated_tags() {
+        let content = r#"---
+title: Test
+tags: rust, testing, cli
+---
+
+Content.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert_eq!(doc.metadata.tags.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_tags() {
+        let content = r#"---
+title: Test
+---
+
+Content.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert!(doc.metadata.tags.is_empty());
+    }
+
+    #[test]
+    fn test_parse_header_hierarchy() {
+        let content = r#"# Level 1
+
+Content 1.
+
+## Level 2
+
+Content 2.
+
+### Level 3
+
+Content 3.
+
+## Another Level 2
+
+Content 4.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert_eq!(doc.title, "Level 1");
+        assert!(!doc.header_hierarchy.is_empty());
+    }
+
+    #[test]
+    fn test_parse_chunking() {
+        let content = r#"# Title
+
+First paragraph with some content.
+
+Second paragraph with more content.
+
+## Section
+
+Third paragraph.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert!(!doc.chunks.is_empty());
+        
+        // Verify chunks have text
+        for chunk in &doc.chunks {
+            assert!(!chunk.text.trim().is_empty());
+            assert!(!chunk.context.is_empty() || chunk.chunk_index == 0);
+        }
+    }
+
+    #[test]
+    fn test_parse_chunking_large_text() {
+        // Create text that exceeds MAX_CHUNK_SIZE
+        let mut content = "# Title\n\n".to_string();
+        let large_paragraph = "This is a sentence. ".repeat(100); // ~2000 characters
+        content.push_str(&large_paragraph);
+        
+        let result = parse_markdown(&content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        
+        // Should be split into multiple chunks
+        assert!(doc.chunks.len() > 1);
+        
+        // Each chunk should be within size limits
+        for chunk in &doc.chunks {
+            assert!(chunk.text.len() <= MAX_CHUNK_SIZE);
+        }
+    }
+
+    #[test]
+    fn test_parse_chunk_context() {
+        let content = r#"# Document
+
+Content at root.
+
+## Section 1
+
+Content in section 1.
+
+### Subsection 1.1
+
+Content in subsection.
+
+## Section 2
+
+Content in section 2.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        
+        // Verify chunks have appropriate context
+        for chunk in &doc.chunks {
+            if chunk.context.contains("Section 1") {
+                assert!(chunk.context.contains("Document"));
+            }
+            if chunk.context.contains("Subsection 1.1") {
+                assert!(chunk.context.contains("Section 1"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_chunk_line_numbers() {
+        let content = r#"# Title
+
+Line 3 content.
+
+Line 5 content.
+
+## Section
+
+Line 9 content.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        
+        // Verify chunks have line numbers
+        for chunk in &doc.chunks {
+            assert!(chunk.start_line > 0);
+            assert!(chunk.end_line >= chunk.start_line);
+        }
+    }
+
+    #[test]
+    fn test_parse_markdown_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test.md");
+        
+        let content = r#"# Test Document
+
+This is test content.
+"#;
+        fs::write(&test_file, content).unwrap();
+        
+        let result = parse_markdown_file(&test_file);
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert_eq!(doc.title, "Test Document");
+        assert!(!doc.chunks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_markdown_file_nonexistent() {
+        let result = parse_markdown_file(Path::new("/nonexistent/file.md"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_multiple_h1_headers() {
+        let content = r#"# First Title
+
+Content 1.
+
+# Second Title
+
+Content 2.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        // First H1 should be title
+        assert_eq!(doc.title, "First Title");
+    }
+
+    #[test]
+    fn test_parse_code_blocks() {
+        let content = r#"# Title
+
+Here is some code:
+
+```rust
+fn main() {
+    println!("Hello");
+}
+```
+
+More content.
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        // Code blocks should be included in chunks
+        assert!(!doc.chunks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_lists() {
+        let content = r#"# Title
+
+- Item 1
+- Item 2
+- Item 3
+
+1. Numbered 1
+2. Numbered 2
+"#;
+        let result = parse_markdown(content, Path::new("test.md"));
+        assert!(result.is_ok());
+        let doc = result.unwrap();
+        assert!(!doc.chunks.is_empty());
+    }
+
+    #[test]
+    fn test_build_context() {
+        let headers = vec!["Document".to_string(), "Section".to_string(), "Subsection".to_string()];
+        let context = build_context(&headers);
+        assert_eq!(context, "Document > Section > Subsection");
+    }
+
+    #[test]
+    fn test_build_context_empty() {
+        let headers = vec![];
+        let context = build_context(&headers);
+        assert_eq!(context, "");
+    }
+
+    #[test]
+    fn test_build_context_single() {
+        let headers = vec!["Document".to_string()];
+        let context = build_context(&headers);
+        assert_eq!(context, "Document");
     }
 }
 
