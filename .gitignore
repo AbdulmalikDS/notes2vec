@@ -1,10 +1,8 @@
-# Rust
 /target/
 **/*.rs.bk
 *.pdb
 Cargo.lock
 
-# IDE
 .idea/
 .vscode/
 .cursor/
@@ -12,23 +10,19 @@ Cargo.lock
 *.swo
 *~
 
-# OS
 .DS_Store
 Thumbs.db
 
-# Project specific
 .notes2vec/
 *.lancedb/
 *.redb
 test_notes/
 
-# Debug
 *.log
 
-# Environment
+
 .env
 .env.local
 
-# Build artifacts
 dist/
 build/
