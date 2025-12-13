@@ -1,22 +1,30 @@
 use clap::Parser;
-use notes2vec::cli::Cli;
-use notes2vec::config::Config;
-use notes2vec::discovery::discover_files;
-use notes2vec::error::{Error, Result};
-use notes2vec::state::{calculate_file_hash, get_file_modified_time, StateStore};
-use notes2vec::vectors::VectorStore;
+use notes2vec::{Cli, Config, discover_files, Error, Result};
+use notes2vec::{EmbeddingModel, StateStore, calculate_file_hash, get_file_modified_time};
+use notes2vec::{VectorStore, SearchTui, FileWatcher};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        notes2vec::cli::Commands::Init { base_dir } => {
+        notes2vec::ui::cli::Commands::Init { base_dir } => {
             handle_init(base_dir.as_deref())
         }
-        notes2vec::cli::Commands::Index { path, force } => handle_index(path.as_str(), *force),
-        notes2vec::cli::Commands::Watch { path } => handle_watch(path.as_str()),
-        notes2vec::cli::Commands::Search { query, limit } => handle_search(query.as_str(), *limit),
+        notes2vec::ui::cli::Commands::Index { path, force, base_dir } => {
+            handle_index(path.as_str(), *force, base_dir.as_deref())
+        }
+        notes2vec::ui::cli::Commands::Watch { path, base_dir } => {
+            handle_watch(path.as_str(), base_dir.as_deref())
+        }
+        notes2vec::ui::cli::Commands::Search {
+            query,
+            limit,
+            base_dir,
+            interactive,
+        } => {
+            handle_search(query.as_deref(), *limit, base_dir.as_deref(), *interactive)
+        }
     }
 }
 
@@ -49,11 +57,12 @@ fn handle_init(base_dir: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn handle_index(path: &str, force: bool) -> Result<()> {
+fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
     println!("Indexing notes from: {}", path);
     
     // Check if initialized
-    let config = Config::new(None)?;
+    let base_path = base_dir.map(PathBuf::from);
+    let config = Config::new(base_path)?;
     if !config.is_initialized() {
         return Err(Error::Config(
             "notes2vec is not initialized. Run 'notes2vec init' first.".to_string(),
@@ -75,6 +84,16 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
         println!("No Markdown files found in {}", path);
         return Ok(());
     }
+    
+    // Initialize embedding model once for all files
+    println!("Initializing embedding model...");
+    let model = match EmbeddingModel::init(&config) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("⚠ Warning: Failed to initialize embedding model: {}. Using hash-based embeddings.", e);
+            return Err(Error::Model(format!("Failed to initialize model: {}", e)));
+        }
+    };
     
     // Process files
     println!("Processing files...");
@@ -105,7 +124,7 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
             }
         }
         
-        match notes2vec::parser::parse_markdown_file(&file.path) {
+        match notes2vec::indexing::parser::parse_markdown_file(&file.path) {
             Ok(doc) => {
                 // Remove old vectors for this file if re-indexing
                 if force {
@@ -115,17 +134,22 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
                     }
                 }
                 
-                // Process chunks (for now, just store metadata - embeddings will be added later)
-                // TODO: Generate embeddings once model loading is implemented
-                for chunk in &doc.chunks {
-                    // Create a placeholder embedding (zeros) - will be replaced with actual embeddings
-                    let embedding_dim = 768; // Default for nomic-embed-text-v1.5
-                    let placeholder_embedding = vec![0.0f32; embedding_dim];
-                    
-                    let vector_entry = notes2vec::vectors::VectorEntry::new(
+                // Generate embeddings for all chunks
+                let chunk_texts: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
+                let embeddings = match model.embed(&chunk_texts) {
+                    Ok(emb) => emb,
+                    Err(e) => {
+                        eprintln!("  ⚠ Warning: Failed to generate embeddings: {}. Skipping file.", e);
+                        continue;
+                    }
+                };
+                
+                // Store vectors with embeddings
+                for (chunk, embedding) in doc.chunks.iter().zip(embeddings.iter()) {
+                    let vector_entry = notes2vec::VectorEntry::new(
                         file_path_str.to_string(),
                         chunk.chunk_index,
-                        placeholder_embedding,
+                        embedding.clone(),
                         chunk.text.clone(),
                         chunk.context.clone(),
                         chunk.start_line,
@@ -173,74 +197,100 @@ fn handle_index(path: &str, force: bool) -> Result<()> {
     if errors > 0 {
         println!("  Errors: {} files", errors);
     }
-    println!("\nNote: Embedding generation will be implemented next. Currently storing placeholder vectors.");
     
     Ok(())
 }
 
-fn handle_watch(path: &str) -> Result<()> {
-    println!("Watching directory for changes: {}", path);
-    
+fn handle_watch(path: &str, base_dir: Option<&str>) -> Result<()> {
     // Check if initialized
-    let config = Config::new(None)?;
+    let base_path = base_dir.map(PathBuf::from);
+    let config = Config::new(base_path)?;
     if !config.is_initialized() {
         return Err(Error::Config(
             "notes2vec is not initialized. Run 'notes2vec init' first.".to_string(),
         ));
     }
     
-    // TODO: Implement file watching logic
-    println!("File watching functionality will be implemented next...");
-    println!("Path: {}", path);
+    let watch_path = PathBuf::from(path);
+    if !watch_path.exists() {
+        return Err(Error::Config(format!(
+            "Path does not exist: {}",
+            path
+        )));
+    }
     
-    Ok(())
+    if !watch_path.is_dir() {
+        return Err(Error::Config(format!(
+            "Path is not a directory: {}",
+            path
+        )));
+    }
+    
+    // Create watcher
+    let mut watcher = FileWatcher::new(&watch_path, config)?;
+    
+    // Start watching (blocks until interrupted)
+    watcher.watch()
 }
 
-fn handle_search(query: &str, limit: usize) -> Result<()> {
+fn handle_search(
+    query: Option<&str>,
+    limit: usize,
+    base_dir: Option<&str>,
+    interactive: bool,
+) -> Result<()> {
+    // Check if initialized
+    let base_path = base_dir.map(PathBuf::from);
+    let config = Config::new(base_path)?;
+    if !config.is_initialized() {
+        return Err(Error::Config(
+            "notes2vec is not initialized. Run 'notes2vec init' first.".to_string(),
+        ));
+    }
+
+    // Use interactive TUI mode if requested or no query provided
+    if interactive || query.is_none() || query.unwrap().is_empty() {
+        let mut tui = SearchTui::new(config)?;
+        return tui.run();
+    }
+
+    // Non-interactive mode
+    let query = query.unwrap();
     println!("Searching for: \"{}\"", query);
-    
-    // Check if initialized
-    let config = Config::new(None)?;
-    if !config.is_initialized() {
-        return Err(Error::Config(
-            "notes2vec is not initialized. Run 'notes2vec init' first.".to_string(),
-        ));
-    }
-    
+
     // Open vector store
     let vector_store = VectorStore::open(&config)?;
-    
-    // TODO: Generate query embedding once model is implemented
-    // For now, use a placeholder embedding
-    let embedding_dim = 768;
-    let query_embedding = vec![0.0f32; embedding_dim];
-    
+
+    // Initialize embedding model and generate query embedding
+    let model = EmbeddingModel::init(&config)?;
+    let query_texts = vec![query.to_string()];
+    let query_embeddings = model.embed(&query_texts)?;
+
+    if query_embeddings.is_empty() {
+        return Err(Error::Model("Failed to generate query embedding".to_string()));
+    }
+
+    let query_embedding = &query_embeddings[0];
+
     // Search for similar vectors
-    match vector_store.search(&query_embedding, limit) {
-        Ok(results) => {
-            if results.is_empty() {
-                println!("\nNo results found.");
-                println!("Note: Embedding generation is not yet implemented. Search will work once embeddings are generated.");
-            } else {
-                println!("\nFound {} results:", results.len());
-                for (i, (entry, similarity)) in results.iter().enumerate() {
-                    println!("\n{}. {} (similarity: {:.3})", i + 1, entry.file_path, similarity);
-                    if !entry.context.is_empty() {
-                        println!("   Context: {}", entry.context);
-                    }
-                    // Show preview of text (first 150 chars)
-                    let preview: String = entry.text.chars().take(150).collect();
-                    println!("   Preview: {}...", preview);
-                    println!("   Lines: {}-{}", entry.start_line, entry.end_line);
-                }
-                println!("\nNote: Embedding generation is not yet implemented. Similarity scores are placeholders.");
+    let results = vector_store.search(&query_embedding, limit)?;
+
+    if results.is_empty() {
+        println!("\nNo results found.");
+    } else {
+        println!("\nFound {} results:", results.len());
+        for (i, (entry, similarity)) in results.iter().enumerate() {
+            println!("\n{}. {} (similarity: {:.3})", i + 1, entry.file_path, similarity);
+            if !entry.context.is_empty() {
+                println!("   Context: {}", entry.context);
             }
-        }
-        Err(e) => {
-            return Err(Error::Database(format!("Search failed: {}", e)));
+            // Show preview of text (first 150 chars)
+            let preview: String = entry.text.chars().take(150).collect();
+            println!("   Preview: {}...", preview);
+            println!("   Lines: {}-{}", entry.start_line, entry.end_line);
         }
     }
-    
+
     Ok(())
 }
 
