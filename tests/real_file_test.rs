@@ -61,17 +61,16 @@ This is the second section with more content.
     
     // Test embedding generation
     let model = EmbeddingModel::init(&config)?;
-    let embedding_dim = model.embedding_dim();
-    assert_eq!(embedding_dim, 768);
+    let expected_dim = 384; // BGE-small-en-v1.5 has 384 dimensions
     
     let texts: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
     let embeddings = model.embed(&texts)?;
     assert_eq!(embeddings.len(), doc.chunks.len());
-    assert_eq!(embeddings[0].len(), embedding_dim);
+    assert_eq!(embeddings[0].len(), expected_dim);
     
     // Test vector storage
     for (_i, (chunk, embedding)) in doc.chunks.iter().zip(embeddings.iter()).enumerate() {
-        let vector_entry = notes2vec::vectors::VectorEntry::new(
+        let vector_entry = notes2vec::VectorEntry::new(
             "test.md".to_string(),
             chunk.chunk_index,
             embedding.clone(),
@@ -89,7 +88,7 @@ This is the second section with more content.
         assert!(retrieved.is_some());
         let retrieved_entry = retrieved.unwrap();
         assert_eq!(retrieved_entry.text, chunk.text);
-        assert_eq!(retrieved_entry.embedding.len(), embedding_dim);
+        assert_eq!(retrieved_entry.embedding.len(), expected_dim);
     }
     
     // Test search
@@ -144,7 +143,7 @@ fn test_multiple_files_indexing() -> Result<()> {
         let file_path_str = file.relative_path.to_str().unwrap();
         
         for (chunk, embedding) in doc.chunks.iter().zip(embeddings.iter()) {
-            let vector_entry = notes2vec::vectors::VectorEntry::new(
+            let vector_entry = notes2vec::VectorEntry::new(
                 file_path_str.to_string(),
                 chunk.chunk_index,
                 embedding.clone(),

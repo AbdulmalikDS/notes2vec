@@ -48,13 +48,25 @@ fn test_file_discovery() -> Result<()> {
     
     let files = discover_files(&test_dir)?;
     
-    // Should find 4 markdown files (file1.md, file2.md, file4.markdown, file5.md)
-    assert_eq!(files.len(), 4);
+    // Should find 5 note files (file1.md, file2.md, file3.txt, file4.markdown, file5.md)
+    // Note: .txt files are also supported as note files
+    assert_eq!(files.len(), 5);
     
-    // Verify all files are markdown
+    // Verify all files are note files (markdown or txt)
     for file in &files {
-        assert!(file.is_markdown);
+        assert!(file.is_markdown); // is_markdown is true for all supported note files
     }
+    
+    // Verify we found the expected files
+    let file_names: Vec<String> = files.iter()
+        .map(|f| f.relative_path.to_str().unwrap().to_string())
+        .collect();
+    assert!(file_names.contains(&"file1.md".to_string()));
+    assert!(file_names.contains(&"file2.md".to_string()));
+    assert!(file_names.contains(&"file3.txt".to_string())); // .txt files are supported
+    assert!(file_names.contains(&"file4.markdown".to_string()));
+    assert!(file_names.contains(&"subdir/file5.md".to_string()) || 
+            file_names.contains(&"subdir\\file5.md".to_string())); // Windows vs Unix paths
     
     Ok(())
 }
