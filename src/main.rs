@@ -313,17 +313,20 @@ fn handle_search(
     let results = vector_store.search(&query_embedding, limit * 3)?;
 
     // Deduplicate: keep best match per file (like TUI does)
+    // Optimized: Pre-allocate HashMap and avoid unnecessary clones
     use std::collections::HashMap;
-    let mut best_by_file: HashMap<String, (VectorEntry, f32)> = HashMap::new();
+    let mut best_by_file: HashMap<String, (VectorEntry, f32)> = HashMap::with_capacity(results.len());
     for (entry, sim) in results {
-        best_by_file
-            .entry(entry.file_path.clone())
-            .and_modify(|current| {
+        match best_by_file.get_mut(&entry.file_path) {
+            Some(current) => {
                 if sim > current.1 {
-                    *current = (entry.clone(), sim);
+                    *current = (entry, sim);
                 }
-            })
-            .or_insert((entry, sim));
+            }
+            None => {
+                best_by_file.insert(entry.file_path.clone(), (entry, sim));
+            }
+        }
     }
     let mut deduped: Vec<(VectorEntry, f32)> = best_by_file.into_values().collect();
     deduped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
