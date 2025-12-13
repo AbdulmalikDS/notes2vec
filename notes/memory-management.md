@@ -1,4 +1,4 @@
-# Memory Management in Systems Programming
+# Memory Management in System Programming
 
 ## Understanding Memory Safety
 
