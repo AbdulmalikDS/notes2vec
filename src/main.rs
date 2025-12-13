@@ -1,29 +1,34 @@
 use clap::Parser;
 use notes2vec::{Cli, Config, discover_files, Error, Result};
 use notes2vec::{EmbeddingModel, StateStore, calculate_file_hash, get_file_modified_time};
-use notes2vec::{VectorStore, SearchTui, FileWatcher};
+use notes2vec::{VectorStore, VectorEntry, SearchTui, FileWatcher};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        notes2vec::ui::cli::Commands::Init { base_dir } => {
+        Some(notes2vec::ui::cli::Commands::Init { base_dir }) => {
             handle_init(base_dir.as_deref())
         }
-        notes2vec::ui::cli::Commands::Index { path, force, base_dir } => {
+        Some(notes2vec::ui::cli::Commands::Index { path, force, base_dir }) => {
             handle_index(path.as_str(), *force, base_dir.as_deref())
         }
-        notes2vec::ui::cli::Commands::Watch { path, base_dir } => {
+        Some(notes2vec::ui::cli::Commands::Watch { path, base_dir }) => {
             handle_watch(path.as_str(), base_dir.as_deref())
         }
-        notes2vec::ui::cli::Commands::Search {
+        Some(notes2vec::ui::cli::Commands::Search {
             query,
             limit,
             base_dir,
             interactive,
-        } => {
+        }) => {
             handle_search(query.as_deref(), *limit, base_dir.as_deref(), *interactive)
+        }
+        None => {
+            // No subcommand provided - always open TUI for interactive search
+            // If query is provided, it will be used as initial search, otherwise TUI starts empty
+            handle_search(cli.query.as_deref(), cli.limit, cli.base_dir.as_deref(), true)
         }
     }
 }
@@ -47,7 +52,7 @@ fn handle_init(base_dir: Option<&str>) -> Result<()> {
     println!("✓ Created configuration directory: {:?}", config.base_dir);
     println!("✓ Created database directory: {:?}", config.database_dir);
     println!("✓ Created models directory: {:?}", config.models_dir);
-    println!("✓ Created state directory: {:?}", config.state_path.parent().unwrap());
+    println!("✓ Created state directory: {:?}", config.state_path.parent().unwrap_or(&config.base_dir));
     
     println!("\nInitialization complete!");
     println!("Next steps:");
@@ -59,6 +64,21 @@ fn handle_init(base_dir: Option<&str>) -> Result<()> {
 
 fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
     println!("Indexing notes from: {}", path);
+    
+    // Validate path exists and is a directory
+    let root_path = PathBuf::from(path);
+    if !root_path.exists() {
+        return Err(Error::Config(format!(
+            "Path does not exist: {}",
+            path
+        )));
+    }
+    if !root_path.is_dir() {
+        return Err(Error::Config(format!(
+            "Path is not a directory: {}",
+            path
+        )));
+    }
     
     // Check if initialized
     let base_path = base_dir.map(PathBuf::from);
@@ -73,8 +93,6 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
     let state_store = StateStore::open(&config)?;
     let vector_store = VectorStore::open(&config)?;
     
-    let root_path = PathBuf::from(path);
-    
     // Discover all Markdown files
     println!("Discovering Markdown files...");
     let files = discover_files(&root_path)?;
@@ -87,7 +105,7 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
     
     // Initialize embedding model once for all files
     println!("Initializing embedding model...");
-    let model = match EmbeddingModel::init(&config) {
+    let model = match EmbeddingModel::init_verbose(&config) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("⚠ Warning: Failed to initialize embedding model: {}. Using hash-based embeddings.", e);
@@ -103,7 +121,15 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
     let mut chunks_indexed = 0;
     
     for file in &files {
-        let file_path_str = file.relative_path.to_str().unwrap_or("");
+        // Convert path to string, skip if invalid UTF-8
+        let file_path_str = match file.relative_path.to_str() {
+            Some(s) => s,
+            None => {
+                eprintln!("  ⚠ Warning: Skipping file with invalid UTF-8 path: {}", file.relative_path.display());
+                errors += 1;
+                continue;
+            }
+        };
         
         // Check if file has changed (unless force is true)
         if !force {
@@ -118,8 +144,13 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
                         continue;
                     }
                 }
-                _ => {
-                    // If we can't get file info, process it anyway
+                (Err(e), _) => {
+                    eprintln!("  ⚠ Warning: Could not get modification time for {}: {}. Processing anyway.", 
+                             file.relative_path.display(), e);
+                }
+                (_, Err(e)) => {
+                    eprintln!("  ⚠ Warning: Could not calculate hash for {}: {}. Processing anyway.", 
+                             file.relative_path.display(), e);
                 }
             }
         }
@@ -249,7 +280,7 @@ fn handle_search(
     }
 
     // Use interactive TUI mode if requested or no query provided
-    if interactive || query.is_none() || query.unwrap().is_empty() {
+    if interactive || query.map(|q| q.is_empty()).unwrap_or(true) {
         let mut tui = SearchTui::new(config)?;
         return tui.run();
     }
@@ -262,9 +293,9 @@ fn handle_search(
     let vector_store = VectorStore::open(&config)?;
 
     // Initialize embedding model and generate query embedding
-    let model = EmbeddingModel::init(&config)?;
+    let model = EmbeddingModel::init_verbose(&config)?;
     let query_texts = vec![query.to_string()];
-    let query_embeddings = model.embed(&query_texts)?;
+    let query_embeddings = model.embed_queries(&query_texts)?;
 
     if query_embeddings.is_empty() {
         return Err(Error::Model("Failed to generate query embedding".to_string()));
@@ -272,14 +303,31 @@ fn handle_search(
 
     let query_embedding = &query_embeddings[0];
 
-    // Search for similar vectors
-    let results = vector_store.search(&query_embedding, limit)?;
+    // Search for similar vectors (get more candidates for deduplication)
+    let results = vector_store.search(&query_embedding, limit * 3)?;
 
-    if results.is_empty() {
+    // Deduplicate: keep best match per file (like TUI does)
+    use std::collections::HashMap;
+    let mut best_by_file: HashMap<String, (VectorEntry, f32)> = HashMap::new();
+    for (entry, sim) in results {
+        best_by_file
+            .entry(entry.file_path.clone())
+            .and_modify(|current| {
+                if sim > current.1 {
+                    *current = (entry.clone(), sim);
+                }
+            })
+            .or_insert((entry, sim));
+    }
+    let mut deduped: Vec<(VectorEntry, f32)> = best_by_file.into_values().collect();
+    deduped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    deduped.truncate(limit);
+
+    if deduped.is_empty() {
         println!("\nNo results found.");
     } else {
-        println!("\nFound {} results:", results.len());
-        for (i, (entry, similarity)) in results.iter().enumerate() {
+        println!("\nFound {} results:", deduped.len());
+        for (i, (entry, similarity)) in deduped.iter().enumerate() {
             println!("\n{}. {} (similarity: {:.3})", i + 1, entry.file_path, similarity);
             if !entry.context.is_empty() {
                 println!("   Context: {}", entry.context);
