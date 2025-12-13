@@ -50,18 +50,18 @@ pub fn perform_search(
     }
 
     // Small lexical boost for obvious matches (helps short queries like "Agenda")
-    // Optimized: Pre-compute lowercase versions once to avoid repeated allocations
+    // Optimized: Use case-insensitive matching helper to reduce allocations
     if !q_lower.is_empty() {
         for (entry, sim) in results.iter_mut() {
             let mut bonus = 0.0f32;
-            // Use case-insensitive contains check without allocating new strings
-            if entry.file_path.to_lowercase().contains(&q_lower) {
+            // Use efficient case-insensitive contains (only allocates when needed)
+            if contains_case_insensitive(&entry.file_path, &q_lower) {
                 bonus += LEXICAL_BOOST_PATH;
             }
-            if entry.context.to_lowercase().contains(&q_lower) {
+            if contains_case_insensitive(&entry.context, &q_lower) {
                 bonus += LEXICAL_BOOST_CONTEXT;
             }
-            if entry.text.to_lowercase().contains(&q_lower) {
+            if contains_case_insensitive(&entry.text, &q_lower) {
                 bonus += LEXICAL_BOOST_TEXT;
             }
             *sim = (*sim + bonus).min(1.0);
@@ -69,17 +69,19 @@ pub fn perform_search(
     }
 
     // Dedupe: keep best match per file, then take top results.
-    // Optimized: Use references where possible to avoid unnecessary clones
+    // Optimized: Avoid unnecessary clones by only cloning when updating
     let mut best_by_file: HashMap<String, (VectorEntry, f32)> = HashMap::with_capacity(results.len());
     for (entry, sim) in results {
-        best_by_file
-            .entry(entry.file_path.clone())
-            .and_modify(|current| {
+        match best_by_file.get_mut(&entry.file_path) {
+            Some(current) => {
                 if sim > current.1 {
-                    *current = (entry.clone(), sim);
+                    *current = (entry, sim);
                 }
-            })
-            .or_insert_with(|| (entry, sim));
+            }
+            None => {
+                best_by_file.insert(entry.file_path.clone(), (entry, sim));
+            }
+        }
     }
     let mut deduped: Vec<(VectorEntry, f32)> = best_by_file.into_values().collect();
     deduped.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -109,18 +111,36 @@ pub fn parse_file_filter_query(raw: &str) -> (Option<String>, String) {
     (filter, parts.join(" "))
 }
 
+/// Case-insensitive contains check (optimized for ASCII, falls back to allocation for Unicode)
+fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    // Fast path: if both strings are ASCII, use byte-level comparison without allocation
+    if haystack.is_ascii() && needle.is_ascii() {
+        let haystack_bytes = haystack.as_bytes();
+        let needle_bytes = needle.as_bytes();
+        haystack_bytes
+            .windows(needle_bytes.len())
+            .any(|window| {
+                window.iter().zip(needle_bytes.iter()).all(|(&b, &n)| {
+                    b.to_ascii_lowercase() == n.to_ascii_lowercase()
+                })
+            })
+    } else {
+        // Unicode path: must allocate for proper case-insensitive matching
+        haystack.to_lowercase().contains(needle)
+    }
+}
+
 /// Check if a file path matches a filter string
 pub fn path_matches_filter(file_path: &str, filter: &str) -> bool {
-    let filter = filter.to_lowercase();
-    let path_lower = file_path.to_lowercase();
-    if path_lower.contains(&filter) {
+    let filter_lower = filter.to_lowercase();
+    if contains_case_insensitive(file_path, &filter_lower) {
         return true;
     }
 
     Path::new(file_path)
         .file_name()
         .and_then(|n| n.to_str())
-        .map(|name| name.to_lowercase().contains(&filter))
+        .map(|name| contains_case_insensitive(name, &filter_lower))
         .unwrap_or(false)
 }
 
