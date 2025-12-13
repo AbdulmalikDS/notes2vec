@@ -6,7 +6,7 @@ use notes2vec::VectorStore;
 use std::fs;
 use tempfile::TempDir;
 
-/// End-to-end functionality test: full indexing and search workflow
+/// End-to-end functionality test: for full indexing and search workflow
 #[test]
 fn test_end_to_end_workflow() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
