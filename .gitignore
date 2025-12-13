@@ -20,6 +20,8 @@ Thumbs.db
 .notes2vec/
 *.lancedb/
 *.redb
+test_notes/
+assets/
 
 # Debug
 *.log
