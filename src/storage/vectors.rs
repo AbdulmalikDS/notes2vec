@@ -19,7 +19,7 @@ pub struct VectorEntry {
     pub embedding: Vec<f32>,
     /// Text content of the chunk
     pub text: String,
-    /// Context (e.g., "Document > Section")
+    /// Context (e.g., "Document > Section") for the chunk
     pub context: String,
     /// Start line in source file
     pub start_line: usize,
