@@ -1,8 +1,8 @@
-# notes2vec
 
 A lightweight, local-first semantic search engine for personal notes, journals, and documentation.
 
-![notes2vec in action](assets/notes2vec.gif)
+
+<img width="2504" height="1056" alt="image" src="https://github.com/user-attachments/assets/a4f42bd1-a2f9-4dbb-97e8-9f6ac95c1d01" />
 
 ## Overview
 
@@ -198,4 +198,5 @@ notes2vec/
 ## License
 
 Licensed under the MIT license 
+
 
