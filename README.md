@@ -1,6 +1,6 @@
 # notes2vec
 
-A lightweight, local-first semantic search engine for personal notes, journals, and documentation.
+A lightweight, local-first semantic search engine for personal notes, journals, and documentation written in Rust
 
 ![notes2vec in action](assets/notes2vec.gif)
 
