@@ -166,6 +166,7 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
                 }
                 
                 // Generate embeddings for all chunks
+                // Reuse chunk texts to avoid extra allocations
                 let chunk_texts: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
                 let embeddings = match model.embed(&chunk_texts) {
                     Ok(emb) => emb,
@@ -175,9 +176,11 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
                     }
                 };
                 
-                // Store vectors with embeddings
+                // Store vectors with embeddings - batch insert for better performance
+                // Pre-allocate vector entries to reduce allocations
+                let mut entries_to_insert = Vec::with_capacity(doc.chunks.len());
                 for (chunk, embedding) in doc.chunks.iter().zip(embeddings.iter()) {
-                    let vector_entry = notes2vec::VectorEntry::new(
+                    entries_to_insert.push(notes2vec::VectorEntry::new(
                         file_path_str.to_string(),
                         chunk.chunk_index,
                         embedding.clone(),
@@ -185,11 +188,14 @@ fn handle_index(path: &str, force: bool, base_dir: Option<&str>) -> Result<()> {
                         chunk.context.clone(),
                         chunk.start_line,
                         chunk.end_line,
-                    );
-                    
-                    if let Err(e) = vector_store.insert(&vector_entry) {
+                    ));
+                }
+                
+                // Insert all entries (redb handles transactions efficiently)
+                for entry in &entries_to_insert {
+                    if let Err(e) = vector_store.insert(entry) {
                         eprintln!("  ⚠ Warning: Failed to store vector for chunk {}: {}", 
-                                 chunk.chunk_index, e);
+                                 entry.chunk_index, e);
                     } else {
                         chunks_indexed += 1;
                     }

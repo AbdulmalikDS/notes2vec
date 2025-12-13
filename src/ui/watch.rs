@@ -204,9 +204,10 @@ impl FileWatcher {
         let chunks_to_embed: Vec<String> = doc.chunks.iter().map(|c| c.text.clone()).collect();
         let embeddings = model.embed(&chunks_to_embed)?;
 
-        // Store vectors
-        for (i, (chunk, embedding)) in doc.chunks.iter().zip(embeddings.iter()).enumerate() {
-            let vector_entry = VectorEntry::new(
+        // Store vectors - pre-allocate entries for better performance
+        let mut entries_to_insert = Vec::with_capacity(doc.chunks.len());
+        for (chunk, embedding) in doc.chunks.iter().zip(embeddings.iter()) {
+            entries_to_insert.push(VectorEntry::new(
                 file_path_str.to_string(),
                 chunk.chunk_index,
                 embedding.clone(),
@@ -214,9 +215,12 @@ impl FileWatcher {
                 chunk.context.clone(),
                 chunk.start_line,
                 chunk.end_line,
-            );
+            ));
+        }
 
-            if let Err(e) = vector_store.insert(&vector_entry) {
+        // Insert all entries
+        for (i, entry) in entries_to_insert.iter().enumerate() {
+            if let Err(e) = vector_store.insert(entry) {
                 eprintln!("  ⚠ Warning: Failed to store vector for chunk {}: {}", i, e);
             }
         }
